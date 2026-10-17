@@ -1,0 +1,24 @@
+{
+  "name": "dmixer",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Declarative audio mixer - the mix is a YAML file",
+  "type": "module",
+  "workspaces": ["packages/core", "packages/server", "packages/web"],
+  "scripts": {
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm run dev -w @dmixer/server",
+    "dev:web": "npm run dev -w @dmixer/web",
+    "build": "npm run build -w @dmixer/web",
+    "typecheck": "tsc -p packages/core && tsc -p packages/server && tsc -p packages/web",
+    "dmixer": "node --import tsx packages/server/src/cli.ts",
+    "setup:analyzer": "uv venv ~/.dmixer/venv && uv pip install --python ~/.dmixer/venv/bin/python -r packages/analyzer/requirements.txt",
+    "test": "node --import tsx --test packages/core/test/*.test.ts packages/server/test/*.test.ts"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "@types/node": "^22.10.5"
+  }
+}

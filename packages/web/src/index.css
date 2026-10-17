@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+/*
+ * The Studio shell (suno-api/packages/web): near-black, flat, almost no colour —
+ * the clips are the only thing that should carry any.
+ */
+@theme {
+  --color-ink-950: #0b0b0c;
+  --color-ink-900: #111112;
+  --color-ink-850: #151516;
+  --color-ink-800: #1a1a1c;
+  --color-ink-750: #202022;
+  --color-ink-700: #262629;
+  --color-ink-600: #333337;
+  --color-ink-500: #4a4a50;
+  --color-ink-400: #6e6e76;
+  --color-ink-300: #9a9aa2;
+  --color-ink-200: #c9c9cf;
+  --color-ink-100: #ececf0;
+  --color-accent: #ffffff;
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* names the components already use, now in the ink palette */
+:root {
+  color-scheme: dark;
+  --bg: #0b0b0c;
+  --panel: #111112;
+  --panel-2: #1a1a1c;
+  --line: rgba(255, 255, 255, 0.05);
+  --text: #c9c9cf;
+  --muted: #6e6e76;
+  --accent: #ffffff;
+  --play: #ffffff;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: var(--color-ink-950);
+  color: var(--color-ink-200);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+/* element resets go in the base layer, so Tailwind's text colours (in the utilities layer) still win on buttons */
+@layer base {
+  input, select, textarea, button { font: inherit; color: inherit; }
+}
+.num, .tabular { font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+
+.field {
+  background: var(--color-ink-950); border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 6px; padding: 3px 7px; width: 100%;
+  color: var(--color-ink-100);
+}
+.field:focus { outline: none; border-color: rgba(255, 255, 255, 0.25); }
+.btn {
+  white-space: nowrap; display: inline-flex; align-items: center; gap: 6px;
+  background: var(--color-ink-800); border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 10px; height: 32px; padding: 0 12px;
+  color: var(--color-ink-200); cursor: pointer;
+}
+.btn:hover { background: var(--color-ink-750); color: var(--color-ink-100); }
+.btn.on { background: var(--color-ink-100); color: #000; }
+.btn:disabled { opacity: 0.35; cursor: default; }
+
+* { scrollbar-width: thin; scrollbar-color: var(--color-ink-600) transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--color-ink-600); border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+input[type="range"].fader {
+  -webkit-appearance: none; appearance: none; height: 4px; background: var(--color-ink-700); border-radius: 2px; outline: none;
+}
+input[type="range"].fader::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 4px; height: 14px; border-radius: 2px; background: var(--color-ink-200); cursor: ew-resize;
+}
+input[type="range"].fader::-moz-range-thumb { width: 4px; height: 14px; border: 0; border-radius: 2px; background: var(--color-ink-200); }
+
+.hatch {
+  background-image: repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.07) 0 6px, transparent 6px 12px);
+}

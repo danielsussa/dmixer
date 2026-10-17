@@ -1,0 +1,155 @@
+# Um exemplo completo. Gere as mídias com ./make-media.sh e abra com:
+#   DMIXER_PROJECT=examples/demo npm run dev
+version: 1
+project:
+  id: f448a05f-3c6f-4f77-9d31-3044731a987b
+  name: demo
+  sample_rate: 44100
+  bpm: 72
+  meter: 4
+  video:
+    width: 1280
+    height: 720
+    fps: 30
+assets:
+  fala-1:
+    src: audio/fala-1.wav
+    meta:
+      duration: 2
+      channels: 1
+      sample_rate: 44100
+      size: 176478
+      hash: 22c1ddfd6f22ed52
+  fala-2:
+    src: audio/fala-2.wav
+    meta:
+      duration: 3
+      channels: 1
+      sample_rate: 44100
+      size: 264678
+      hash: e8ce71626578219c
+  imagem:
+    src: audio/imagem.mp4
+    meta:
+      duration: 14
+      size: 4875422
+      hash: 428cb6102feec923
+      width: 1280
+      height: 720
+      fps: 30
+      has_audio: false
+  musica:
+    src: audio/musica.wav
+    meta:
+      duration: 14
+      channels: 1
+      sample_rate: 44100
+      size: 1234878
+      hash: a82e0330741722a7
+markers:
+  - id: virada
+    at: 6.67
+    label: a virada
+  - id: respiro
+    at: "@virada + 3"
+    label: respiro
+# O plano, antes da música: tags em faixas. "@virada" ancora as duas tags da música no marcador.
+lanes:
+  - id: voz
+    name: Voz
+  - id: musica
+    name: Música
+regions:
+  - id: narracao-1
+    start: 1
+    end: 3
+    label: Narração
+    lane: voz
+    color: "#6a9bcc"
+  - id: narracao-2
+    start: "@virada"
+    end: "@virada + 3"
+    label: Narração
+    lane: voz
+    color: "#6a9bcc"
+  - id: tensao
+    start: 0
+    end: "@virada"
+    label: Tensão crescente
+    lane: musica
+    color: "#7b74b8"
+  - id: impacto
+    start: "@virada"
+    end: 14
+    label: Impacto
+    lane: musica
+    color: "#b47c62"
+master:
+  loudness:
+    target: -14
+    true_peak: -1.5
+tracks:
+  - id: video
+    type: video
+    name: Vídeo
+    clips:
+      - id: abertura
+        asset: imagem
+        start: 0
+        out: 6.67
+      - id: virada
+        asset: imagem
+        start: "@virada"
+        in: 8
+  - id: voz
+    name: Narração
+    volume: 0
+    effects:
+      - type: highpass
+        freq: 80
+      - type: compressor
+        threshold: -18
+        ratio: 3
+    clips:
+      - id: frase-1
+        asset: fala-1
+        start: 1
+        label: primeira frase
+      - id: frase-2
+        asset: fala-2
+        start: "@virada"
+        label: segunda frase
+  - id: musica
+    name: Música
+    output: bus-musica
+    clips:
+      - id: cama
+        asset: musica
+        start: 0
+        fade_in: 0.5
+        fade_out: 2
+  - id: bus-musica
+    type: bus
+    name: Bus música
+    volume: -9
+    effects:
+      - type: eq
+        freq: 3000
+        gain: -3
+        q: 1
+      - type: duck
+        source: voz
+        depth: 10
+        attack: 0.1
+        release: 0.5
+      - type: reverb
+        mix: 0.2
+        seconds: 2
+    automation:
+      volume:
+        - at: 0
+          db: 0
+        - at: "@respiro"
+          db: 0
+        - at: "@respiro + 2"
+          db: -20

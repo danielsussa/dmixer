@@ -1,0 +1,13 @@
+{
+  "name": "@dmixer/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "dmixer": "./src/cli.ts" },
+  "scripts": {
+    "dev": "node --import tsx --watch src/index.ts",
+    "start": "node --import tsx src/index.ts"
+  },
+  "dependencies": { "@dmixer/core": "*", "chokidar": "^4.0.3", "express": "^4.21.2", "ws": "^8.18.0" },
+  "devDependencies": { "@types/express": "^4.17.21", "@types/ws": "^8.5.13" }
+}
