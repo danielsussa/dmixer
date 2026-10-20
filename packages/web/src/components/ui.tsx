@@ -3,93 +3,89 @@ import React, { useEffect, useRef, useState } from 'react'
 export const cx = (...parts: (string | false | null | undefined)[]) => parts.filter(Boolean).join(' ')
 
 type IconProps = { size?: number; className?: string }
-const svg = (size: number, className: string | undefined, children: React.ReactNode, fill = false) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill={fill ? 'currentColor' : 'none'}
-    stroke={fill ? 'none' : 'currentColor'}
-    strokeWidth={1.7}
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className={className}
-    aria-hidden
-  >
+const svg = (size: number, className: string | undefined, children: React.ReactNode) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden>
     {children}
   </svg>
 )
+/** the parts that are lines (arrows' shafts, handles), drawn heavy enough to read as solid next to the fills */
+const L = ({ d }: { d: string }) => <path d={d} fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" />
 
-/** The handful of glyphs the shell needs, drawn to one stroke weight. */
+/** The handful of glyphs the shell needs, all solid: shapes filled, lines drawn heavy. */
 export const Icon = {
-  Play: ({ size = 16, className }: IconProps) => svg(size, className, <path d="M7 4.5v15l13-7.5z" />, true),
+  Play: ({ size = 16, className }: IconProps) => svg(size, className, <path d="M7 4.5v15l13-7.5z" />),
   Pause: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><rect x="6" y="4.5" width="4" height="15" rx="1" /><rect x="14" y="4.5" width="4" height="15" rx="1" /></>, true),
+    svg(size, className, <><rect x="6" y="4.5" width="4" height="15" rx="1" /><rect x="14" y="4.5" width="4" height="15" rx="1" /></>),
   Rewind: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><path d="M11 5.5v13L2.5 12z" /><path d="M21 5.5v13L12.5 12z" /></>, true),
-  Record: ({ size = 16, className }: IconProps) => svg(size, className, <circle cx="12" cy="12" r="6" />, true),
+    svg(size, className, <><path d="M11 5.5v13L2.5 12z" /><path d="M21 5.5v13L12.5 12z" /></>),
+  Record: ({ size = 16, className }: IconProps) => svg(size, className, <circle cx="12" cy="12" r="6" />),
   Loop: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><path d="M17 3l3 3-3 3" /><path d="M20 6H8a4 4 0 0 0-4 4v1" /><path d="M7 21l-3-3 3-3" /><path d="M4 18h12a4 4 0 0 0 4-4v-1" /></>),
+    svg(size, className, <><L d="M17 6H8a4 4 0 0 0-4 4v1" /><path d="M16.5 2.5l4.5 3.5-4.5 3.5z" /><L d="M7 18h9a4 4 0 0 0 4-4v-1" /><path d="M7.5 14.5L3 18l4.5 3.5z" /></>),
   Metronome: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><path d="M5 5v14M9 5v14M13 5v14M17 5v14M21 5v14" /></>),
+    svg(size, className, <>{[3.8, 7.9, 12, 16.1, 20.2].map((x) => <rect key={x} x={x - 1.2} y="5" width="2.4" height="14" rx="1.2" />)}</>),
   Cursor: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><path d="M4 12h13" /><path d="M13 7l5 5-5 5" /><path d="M20 4v16" /></>),
-  Undo: ({ size = 16, className }: IconProps) => svg(size, className, <><path d="M9 14L4 9l5-5" /><path d="M4 9h11a5 5 0 0 1 0 10h-3" /></>),
-  Redo: ({ size = 16, className }: IconProps) => svg(size, className, <><path d="M15 14l5-5-5-5" /><path d="M20 9H9a5 5 0 0 0 0 10h3" /></>),
-  Export: ({ size = 16, className }: IconProps) => svg(size, className, <><path d="M14 4l6 6-6 6" /><path d="M20 10H10a6 6 0 0 0-6 6v4" /></>),
+    svg(size, className, <><L d="M4 12h9" /><path d="M12 6.5l6 5.5-6 5.5z" /><rect x="19" y="4" width="2.6" height="16" rx="1.3" /></>),
+  Undo: ({ size = 16, className }: IconProps) => svg(size, className, <><L d="M8 9h7a5 5 0 0 1 0 10h-3" /><path d="M9.5 3.5L3 9l6.5 5.5z" /></>),
+  Redo: ({ size = 16, className }: IconProps) => svg(size, className, <><L d="M16 9H9a5 5 0 0 0 0 10h3" /><path d="M14.5 3.5L21 9l-6.5 5.5z" /></>),
+  Export: ({ size = 16, className }: IconProps) => svg(size, className, <><L d="M16 10h-6a6 6 0 0 0-6 6v4" /><path d="M14 3.5l7 6.5-7 6.5z" /></>),
   Library: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><path d="M5 4v16M9 4v16" /><path d="M13.5 4.5l5 15" /></>),
+    svg(size, className, <><rect x="3" y="4" width="4" height="16" rx="1" /><rect x="8.5" y="4" width="4" height="16" rx="1" /><path d="M13.6 5.3l3.6-1.2a.8.8 0 0 1 1 .5l4.6 14.2a.8.8 0 0 1-.5 1l-3.6 1.2a.8.8 0 0 1-1-.5L13.1 6.3a.8.8 0 0 1 .5-1z" /></>),
   More: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" /></>, true),
-  Plus: ({ size = 16, className }: IconProps) => svg(size, className, <><path d="M12 5v14M5 12h14" /></>),
-  Close: ({ size = 16, className }: IconProps) => svg(size, className, <><path d="M6 6l12 12M18 6L6 18" /></>),
+    svg(size, className, <><circle cx="5" cy="12" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="19" cy="12" r="2" /></>),
+  Plus: ({ size = 16, className }: IconProps) => svg(size, className, <L d="M12 5v14M5 12h14" />),
+  Close: ({ size = 16, className }: IconProps) => svg(size, className, <L d="M6 6l12 12M18 6L6 18" />),
   Split: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><rect x="3.5" y="5" width="17" height="14" rx="2" /><path d="M12 5v14" /></>),
-  Up: ({ size = 16, className }: IconProps) => svg(size, className, <><path d="M12 19V5M6 11l6-6 6 6" /></>),
-  Chevron: ({ size = 16, className }: IconProps) => svg(size, className, <path d="M7 10l5 5 5-5" />),
+    svg(size, className, <><rect x="3" y="5" width="8" height="14" rx="2" /><rect x="13" y="5" width="8" height="14" rx="2" /></>),
+  Up: ({ size = 16, className }: IconProps) => svg(size, className, <><L d="M12 20V10" /><path d="M5 11.5L12 4l7 7.5z" /></>),
+  Chevron: ({ size = 16, className }: IconProps) => svg(size, className, <path d="M6.5 9.5h11a.8.8 0 0 1 .6 1.3l-5.5 5.6a.8.8 0 0 1-1.2 0l-5.5-5.6a.8.8 0 0 1 .6-1.3z" />),
   Speaker: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><path d="M4 9h4l5-4v14l-5-4H4z" /><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12" /></>),
-  Mic: ({ size = 16, className }: IconProps) => svg(size, className, <><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></>),
-  Collapse: ({ size = 16, className }: IconProps) => svg(size, className, <><path d="M4 7l5 5-5 5M20 7l-5 5 5 5" /></>),
-  Expand: ({ size = 16, className }: IconProps) => svg(size, className, <><path d="M9 7l-5 5 5 5M15 7l5 5-5 5" /></>),
+    svg(size, className, <><path d="M3 9.5A1 1 0 0 1 4 8.5h3.5L12 4.6a.6.6 0 0 1 1 .5v13.8a.6.6 0 0 1-1 .5l-4.5-3.9H4a1 1 0 0 1-1-1z" /><L d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12" /></>),
+  Mic: ({ size = 16, className }: IconProps) => svg(size, className, <><rect x="8.5" y="2.5" width="7" height="12" rx="3.5" /><L d="M5 11a7 7 0 0 0 14 0M12 18v3" /></>),
+  Collapse: ({ size = 16, className }: IconProps) => svg(size, className, <><path d="M3 6.5l7 5.5-7 5.5z" /><path d="M21 6.5L14 12l7 5.5z" /></>),
+  Expand: ({ size = 16, className }: IconProps) => svg(size, className, <><path d="M10 6.5L3 12l7 5.5z" /><path d="M14 6.5l7 5.5-7 5.5z" /></>),
   Tracks: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><path d="M4 7h10M4 12h7M4 17h10" /><path d="M17 15l3 3M20 15l-3 3" /></>),
+    svg(size, className, <><rect x="3" y="5.5" width="12" height="3" rx="1.5" /><rect x="3" y="10.5" width="8" height="3" rx="1.5" /><rect x="3" y="15.5" width="12" height="3" rx="1.5" /><L d="M17 14.5l3.5 3.5M20.5 14.5L17 18" /></>),
   Mixer: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><path d="M6 4v16M12 4v16M18 4v16" /><path d="M4 14h4M10 8h4M16 16h4" /></>),
-  Automation: ({ size = 16, className }: IconProps) => svg(size, className, <path d="M4 19c4-1 5-14 9-14s3 9 7 9" />),
+    svg(size, className, <><L d="M6 4v16M12 4v16M18 4v16" /><rect x="3.5" y="12" width="5" height="4" rx="1.3" /><rect x="9.5" y="6" width="5" height="4" rx="1.3" /><rect x="15.5" y="14" width="5" height="4" rx="1.3" /></>),
+  Automation: ({ size = 16, className }: IconProps) => svg(size, className, <path d="M3 19c4-1 5-14 9-14s3 9 9 9v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" />),
   Wave: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <path d="M3 12h2M7 8v8M10 5v14M13 9v6M16 6v12M19 10v4M21 12h0" />),
-  List: ({ size = 16, className }: IconProps) => svg(size, className, <path d="M4 6h16M4 10h16M4 14h16M4 18h16" />),
+    svg(size, className, <>{[[3, 10.8, 13.2], [6.5, 7.5, 16.5], [10, 4.5, 19.5], [13.5, 8.5, 15.5], [17, 6, 18], [20.5, 9.5, 14.5]].map(([x, a, b]) => <rect key={x} x={x - 1.2} y={a} width="2.4" height={b - a} rx="1.2" />)}</>),
+  List: ({ size = 16, className }: IconProps) =>
+    svg(size, className, <>{[4.8, 9.6, 14.4, 19.2].map((y) => <rect key={y} x="3.5" y={y - 1.2} width="17" height="2.4" rx="1.2" />)}</>),
   Folder: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M7 13h4" /></>),
+    svg(size, className, <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />),
   ZoomIn: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><circle cx="11" cy="11" r="6" /><path d="M20 20l-4.5-4.5M8.5 11h5M11 8.5v5" /></>),
+    svg(size, className, <><path fillRule="evenodd" d="M11 4a7 7 0 1 0 0 14a7 7 0 1 0 0-14zM10 7.5h2V10h2.5v2H12v2.5h-2V12H7.5v-2H10z" /><L d="M20 20l-4-4" /></>),
   ZoomOut: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><circle cx="11" cy="11" r="6" /><path d="M20 20l-4.5-4.5M8.5 11h5" /></>),
+    svg(size, className, <><path fillRule="evenodd" d="M11 4a7 7 0 1 0 0 14a7 7 0 1 0 0-14zM7.5 10h7v2h-7z" /><L d="M20 20l-4-4" /></>),
   Bulb: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><path d="M9 18h6M10 21h4" /><path d="M12 3a6 6 0 0 0-3.5 10.9V16h7v-2.1A6 6 0 0 0 12 3z" /></>),
+    svg(size, className, <><path d="M12 2.5a6.5 6.5 0 0 0-4 11.6V16a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-1.9a6.5 6.5 0 0 0-4-11.6z" /><L d="M9.5 20h5" /></>),
   Video: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><rect x="3" y="6" width="13" height="12" rx="2" /><path d="M16 10l5-3v10l-5-3" /></>),
+    svg(size, className, <><rect x="2.5" y="6" width="13.5" height="12" rx="2.5" /><path d="M17 10.2l4-2.7a.6.6 0 0 1 1 .5v8a.6.6 0 0 1-1 .5l-4-2.7z" /></>),
   Music: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><path d="M9 18V5l11-2v13" /><circle cx="6.5" cy="18" r="2.5" /><circle cx="17.5" cy="16" r="2.5" /></>),
-  Code: ({ size = 16, className }: IconProps) => svg(size, className, <><path d="M8 7l-5 5 5 5M16 7l5 5-5 5" /></>),
+    svg(size, className, <><L d="M9 18V5.5l11-2V16" /><circle cx="6.5" cy="18" r="3" /><circle cx="17.5" cy="16" r="3" /></>),
+  Code: ({ size = 16, className }: IconProps) => svg(size, className, <L d="M8 7l-5 5 5 5M16 7l5 5-5 5" />),
   Trash: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><path d="M4 7h16M10 7V4h4v3M6 7l1 13h10l1-13" /></>),
+    svg(size, className, <><rect x="3.5" y="5.5" width="17" height="2.6" rx="1.3" /><path d="M9 5.5V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1.5z" /><path d="M5.5 9.5h13l-1 10.6a1 1 0 0 1-1 .9h-9a1 1 0 0 1-1-.9z" /></>),
   Note: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><path d="M10 3h3.2c.4 2.3 2 3.6 4.3 4.2v3c-1.6-.2-3-.8-4.3-1.7V16a4 4 0 1 1-3.2-3.9z" /></>, true),
+    svg(size, className, <path d="M10 3h3.2c.4 2.3 2 3.6 4.3 4.2v3c-1.6-.2-3-.8-4.3-1.7V16a4 4 0 1 1-3.2-3.9z" />),
   TextT: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <path d="M5 4h14v4h-3V7.5h-2.5V17H15v3H9v-3h1.5V7.5H8V8H5z" />, true),
+    svg(size, className, <path d="M5 4h14v4h-3V7.5h-2.5V17H15v3H9v-3h1.5V7.5H8V8H5z" />),
   Controls: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><path d="M6 4v16M12 4v16M18 4v16" /><path d="M3.5 15h5M9.5 8h5M15.5 13h5" /></>),
+    svg(size, className, <><L d="M6 4v16M12 4v16M18 4v16" /><rect x="3.5" y="13" width="5" height="4" rx="1.3" /><rect x="9.5" y="6" width="5" height="4" rx="1.3" /><rect x="15.5" y="11" width="5" height="4" rx="1.3" /></>),
   Pointer: ({ size = 16, className }: IconProps) => svg(size, className, <path d="M6 3.5l12 7.5-5.2 1.3 2.9 5.8-2.3 1.2-2.9-5.8L6 17z" />),
   Blade: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><circle cx="6" cy="18" r="2.5" /><circle cx="6" cy="6" r="2.5" /><path d="M8 7.5L20 18M8 16.5L20 6" /></>),
-  RangeTool: ({ size = 16, className }: IconProps) => svg(size, className, <><path d="M8 5H5v14h3M16 5h3v14h-3" /><path d="M9 12h6" /></>),
+    svg(size, className, <><circle cx="6" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><L d="M8 7.5L20 18M8 16.5L20 6" /></>),
+  RangeTool: ({ size = 16, className }: IconProps) =>
+    svg(size, className, <><L d="M8 5H5v14h3M16 5h3v14h-3" /><rect x="8.5" y="10.3" width="7" height="3.4" rx="1.2" /></>),
   Sparkle: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z" />, true),
-  Download: ({ size = 16, className }: IconProps) => svg(size, className, <><path d="M12 4v11M7 10l5 5 5-5" /><path d="M5 20h14" /></>),
+    svg(size, className, <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z" />),
+  Download: ({ size = 16, className }: IconProps) =>
+    svg(size, className, <><L d="M12 4v8" /><path d="M6.5 10.5h11L12 16.5z" /><rect x="4" y="18.5" width="16" height="2.6" rx="1.3" /></>),
+  Fullscreen: ({ size = 16, className }: IconProps) => svg(size, className, <L d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" />),
+  ExitFullscreen: ({ size = 16, className }: IconProps) => svg(size, className, <L d="M9 4v5H4M15 4v5h5M20 15h-5v5M4 15h5v5" />),
   Copy: ({ size = 16, className }: IconProps) =>
-    svg(size, className, <><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></>),
+    svg(size, className, <><rect x="8" y="8" width="13" height="13" rx="2.5" /><path d="M4 6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v.5H9.5a3 3 0 0 0-3 3V16H6a2 2 0 0 1-2-2z" /></>),
 }
 
 /** A rounded dark capsule — the shape every group of controls sits in. */

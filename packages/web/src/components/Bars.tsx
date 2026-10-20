@@ -87,6 +87,10 @@ export function TopBar() {
             onCommit={(v) => { const n = Number(v.split('/')[0]); if (n >= 1 && n <= 16) void setProject('meter', n, `Meter ${n}/4`) }} />
         </Pill>
       )}
+      <button type="button" onClick={() => go(`/c/${s.projectName}/roteiro`)} title="O texto da narração, por capítulo e humor"
+        className="h-9 px-3 rounded-[10px] text-[13px] bg-ink-800 text-ink-200 border border-white/[0.04] hover:bg-ink-750 flex items-center gap-1.5">
+        <Icon.TextT size={14} /> Roteiro
+      </button>
       <button type="button" onClick={() => void save()} title="Salvar (Ctrl+S)"
         className={cx('h-9 px-3.5 rounded-[10px] text-[13px] border', s.dirty ? 'bg-ink-100 text-black border-transparent font-medium' : 'bg-ink-800 text-ink-400 border-white/[0.04]')}>
         {s.dirty ? 'Salvar' : 'Salvo'}
@@ -116,7 +120,8 @@ function ExportMenu() {
       items={[
         { label: 'Render mp3', icon: <Icon.Music size={14} />, disabled: busy, onSelect: () => void startRender('mp3') },
         { label: 'Render wav', icon: <Icon.Wave size={14} />, disabled: busy, onSelect: () => void startRender('wav') },
-        ...(hasVideo ? [{ label: 'Render mp4 (com a imagem)', icon: <Icon.Video size={14} />, disabled: busy, onSelect: () => void startRender('mp4') }] : []),
+        // o mp4 (com a imagem) não sai daqui: é pesado, e roda só por script (`npm run dmixer -- render <mix> --out x.mp4`)
+        ...(hasVideo ? [{ label: 'mp4: pelo script (render na pasta renders/)', icon: <Icon.Video size={14} />, disabled: true }] : []),
         { separator: true, label: '' },
         ...(s.render?.error ? [{ label: `Erro: ${s.render.error.slice(0, 40)}`, danger: true }] : []),
         ...renders.slice(0, 5).map((f) => ({ label: f, icon: <Icon.Download size={14} />, onSelect: () => dl(f) })),

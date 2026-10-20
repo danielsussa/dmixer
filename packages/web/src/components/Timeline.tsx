@@ -1,16 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  dbToGain, duckRegions, formatTime, isSamplerTrack, isTimeExpression, round,
-  type Point, type ResolvedClip, type ResolvedProject, type ResolvedRegion, type ResolvedTrack,
-} from '@dmixer/core'
-import { analisesProntas, gradeDaMusica, importAudio, loadAnalysis, P, patch, pontoDaMusica } from '../api'
+  dbToGain, duckRegions, FAIXA_HUMOR, HUMORES, formatTime, isSamplerTrack, isTimeExpression, round,
+  type Point, type ResolvedClip, type ResolvedProject, type ResolvedRegion, type ResolvedTrack, CORES_FUNCAO } from '@dmixer/core'
+import { acervoProntas, gradeDaMusica, importAudio, loadAcervo, P, patch, pontoDaMusica } from '../api'
 import { editable, splitAt } from '../tools'
 import { engine } from '../audio'
 import { useEditor } from '../store'
 import { Wave } from './Wave'
-import { Thumbs } from './Viewer'
+import { VideoBody } from './Viewer'
 import { cx, Icon, IconButton } from './ui'
-import { coberturas, cortarOps, DRAG_TYPE, dropPiece, encaixeNoCorte, freeStart, isLibraryPiece, libraryItemsById, refitComplement, restaurarSoltos, useLibraryItems } from './Library'
+import { coberturas, cortarOps, DRAG_TYPE, dropPiece, encaixeNoCorte, freeStart, isLibraryPiece, juntasOps, libraryItemsById, pecasDaTrilha, refitComplement, restaurarSoltos, useLibraryItems } from './Library'
 import { LaneConnectors } from './Connectors'
 
 const alpha = (hex: string, a: number) => {
@@ -253,12 +252,29 @@ export function Timeline() {
             const others = alvo.clips.filter((x) => !(alvo.id === d.track.id && x.id === c.id)).map((x) => ({ start: x.start, end: x.bodyEnd }))
             start = round(freeStart(others, start, len))
           }
+        } else if (alvo?.quebra) {
+          // quebra-cabeça: a peça não cai em cima de outra; solta perto do fim de uma, cola nela
+          const others = alvo.clips.filter((x) => !(alvo.id === d.track.id && x.id === c.id)).map((x) => ({ start: x.start, end: x.bodyEnd }))
+          const want = c.start + dt
+          const ima = others.map((o) => o.end).filter((e) => Math.abs(e - want) < 1.5).sort((a, b) => Math.abs(a - want) - Math.abs(b - want))[0]
+          start = round(freeStart(others, ima ?? want, len))
         }
         if (Math.abs(start - c.start) < 0.001 && d.toTrack === d.track.id) return
         const ops: { op: 'add' | 'replace' | 'remove'; path: string; value?: unknown }[] = d.toTrack !== d.track.id
           ? [{ op: 'remove', path }, { op: 'add', path: `${P.track(d.toTrack)}/clips/-`, value: { ...c.raw, start } }]
           : [{ op: 'replace', path: `${path}/start`, value: start }]
         if (corte) ops.push(...cortarOps(d.toTrack, corte.clip.raw, corte.at))
+        // quebra-cabeça: as juntas da trilha de onde a peça saiu e da que ela entrou se refazem (vizinhas sem fade, pulo
+        // com crossfade de cauda)
+        for (const tid of new Set([d.track.id, d.toTrack])) {
+          if (!resolved.tracks.find((x) => x.id === tid)?.quebra) continue
+          const pecas = pecasDaTrilha(project, tid, c.id)
+          if (tid === d.toTrack) {
+            pecas.push({ id: c.id, asset: c.asset, start, inP: c.in, body: c.raw.body ?? c.out, out: c.out, fadeIn: c.raw.fade_in, fadeOut: c.raw.fade_out, head: c.raw.head,
+              durArquivo: project.assets[c.asset]?.meta?.duration ?? c.out, bpm: acervoProntas.get(c.src)?.bpm })
+          }
+          ops.push(...juntasOps(project, tid, pecas))
+        }
         // as peças cortadas que ficaram sem ninguém no ponto de corte voltam inteiras (arrastar de volta desfaz)
         for (const t of resolved.tracks.filter((x) => x.samplers && (x.id === d.toTrack || x.id === d.track.id))) {
           const depois = t.clips.filter((x) => !(t.id === d.track.id && x.id === c.id) && x.id !== corte?.clip.id)
@@ -349,6 +365,13 @@ export function Timeline() {
         const t = Math.max(0, (e.clientX - el.getBoundingClientRect().left - HEADER + el.scrollLeft) / zoom)
         const row = (e.target as HTMLElement).closest('[data-track]') as HTMLElement | null
         // an audio file from the computer: onto the audio track under the pointer
+        const fotos = [...e.dataTransfer.files].filter((f) => PICTURE_FILE.test(f.name))
+        if (fotos.length) {
+          e.preventDefault()
+          if (row?.dataset.kind !== 'video') return alert('Solte a foto ou o vídeo sobre uma trilha de vídeo.')
+          void (async () => { let at = snapTo(t, e.altKey); for (const f of fotos) { await importAudio(f, row.dataset.track!, at); at += 4 } })()
+          return
+        }
         const files = [...e.dataTransfer.files].filter((f) => AUDIO_FILE.test(f.name))
         if (files.length) {
           e.preventDefault()
@@ -359,7 +382,8 @@ export function Timeline() {
         const data = e.dataTransfer.getData(DRAG_TYPE)
         if (!data) return
         e.preventDefault()
-        void dropPiece(project, data, t, row?.dataset.kind === 'samplers' ? row.dataset.track! : null, e.altKey ? 'off' : snapGrid)
+        void dropPiece(project, data, t, row?.dataset.kind === 'samplers' ? row.dataset.track! : null, e.altKey ? 'off' : snapGrid,
+          row?.dataset.kind === 'quebra' || row?.dataset.kind === 'audio' ? row.dataset.track! : null)
       }}>
       <div className="flex flex-col" style={{ width: width + HEADER, minHeight: `max(${totalH}px, 100%)`, position: 'relative' }}>
         {/* ruler */}
@@ -514,10 +538,12 @@ function Lane({ r, t, zoom, width, selection, drag, setDrag, editEnvelope, snapT
   useEditor((s) => s.analysisTick)   // redesenha quando chega a análise de uma música
   const libItems = useLibraryItems()
   const project = useEditor((s) => s.project)
-  // músicas (áudios longos que não são peças): analisa sozinho, em segundo plano, para a grade e o SNAP delas
+  // músicas que vieram do acervo: as peças dele (função, energia, humor) aparecem no clipe. O analisador antigo
+  // (analyze.py: grade e SNAP da música) é legado: não roda mais sozinho, só quando uma ferramenta do inspetor pede.
   useEffect(() => {
     for (const c of t.clips) {
-      if (!libItems.has(c.asset) && (project?.assets[c.asset]?.meta?.duration ?? 0) >= 60) void loadAnalysis(c.src).catch(() => {})
+      // veio do acervo? as peças dele (função, energia, humor) aparecem no clipe
+      if (t.type === 'audio' && !libItems.has(c.asset) && (project?.assets[c.asset]?.meta?.duration ?? 0) >= 30) void loadAcervo(c.src).catch(() => {})
     }
   }, [t.clips, libItems, project])
   const h = rowHeight(t)
@@ -551,7 +577,7 @@ function Lane({ r, t, zoom, width, selection, drag, setDrag, editEnvelope, snapT
         const dt = d ? d.dx / zoom : 0
         let start = c.start
         // peça da biblioteca: o bloco mostra só o corpo (é o que encaixa); a cauda soa por baixo da próxima, sem aparecer
-        const corpo = libItems.has(c.asset) && c.bodyEnd < c.end - 0.01
+        const corpo = (libItems.has(c.asset) || t.quebra) && c.bodyEnd < c.end - 0.01
         let dur = corpo ? c.bodyEnd - c.start : c.duration
         let from = c.in
         if (d?.mode === 'move') start = Math.max(0, snapTo(c.start + dt, false, c, c.bodyEnd - c.start))
@@ -569,7 +595,7 @@ function Lane({ r, t, zoom, width, selection, drag, setDrag, editEnvelope, snapT
         const w = Math.max(2, dur * zoom)
         const anchored = isTimeExpression(c.raw.start)
         // peças da biblioteca só movem; complementos esticam pelas bordas (são refeitos no novo tamanho)
-        const locked = isLibraryPiece(c.asset) && libItems.get(c.asset)?.role !== 'complemento'
+        const locked = (isLibraryPiece(c.asset) && libItems.get(c.asset)?.role !== 'complemento') || t.quebra
         return (
           <div key={c.id}
             className={cx('absolute top-[4px] rounded-md overflow-hidden', cutting ? (editable(c) && t.type !== 'video' ? 'cursor-crosshair' : 'cursor-not-allowed') : 'cursor-grab active:cursor-grabbing', sel ? 'ring-[1.5px] ring-white' : 'ring-1 ring-black/40',
@@ -606,24 +632,14 @@ function Lane({ r, t, zoom, width, selection, drag, setDrag, editEnvelope, snapT
             </div>
             <div className="relative" style={{ height: h - 8 - CLIP_HEAD }}>
               {t.type === 'video'
-                ? <Thumbs src={c.src} from={from} to={from + dur} width={w} height={h - 8 - CLIP_HEAD} />
+                ? <VideoBody clip={c} from={from} to={from + dur} width={w} height={h - 8 - CLIP_HEAD} />
                 : <Wave src={c.src} from={from} to={from + dur} width={w} height={h - 8 - CLIP_HEAD} gain={dbToGain(c.gain)} color={alpha(t.color, 0.95)} />}
             </div>
+            {t.type === 'audio' && <AcervoPecas src={c.src} from={from} dur={dur} zoom={zoom} height={h - 8 - CLIP_HEAD} />}
             {c.bodyEnd < c.end - 0.01 && !corpo && (
               <div className="absolute top-0 bottom-0 hatch bg-black/40 border-l border-white/40 pointer-events-none"
                 style={{ left: Math.max(0, (c.bodyEnd - c.start) * zoom), right: 0 }} title="cauda: soa por cima da próxima peça" />
             )}
-            {/* a grade da própria música (compassos da análise; a cada 4, a frase mais marcada) */}
-            {(() => {
-              const g = gradeDaMusica(c, 'bar')
-              if (g.length < 2 || (g[1] - g[0]) * zoom < 6) return null
-              const a = analisesProntas.get(c.src)
-              const fase = a?.bars ? a.bars.findIndex((b) => b >= c.in) : 0
-              return g.map((x, k) => (
-                <div key={k} className="absolute top-0 bottom-0 pointer-events-none"
-                  style={{ left: (x - c.start) * zoom, borderLeft: `1px solid rgba(255,255,255,${(k + fase) % 4 === 0 ? 0.4 : 0.16})` }} />
-              ))
-            })()}
             {/* pontos de emenda medidos: onde outra peça pode entrar (e esta termina ali) */}
             {libItems.get(c.asset)?.cuts?.filter((k) => k.at - c.in > 0.05 && k.at - c.in < dur - 0.05).map((k) => (
               <div key={k.bar} className="absolute top-0 bottom-0 pointer-events-none"
@@ -647,8 +663,124 @@ function Lane({ r, t, zoom, width, selection, drag, setDrag, editEnvelope, snapT
           </div>
         )
       })}
+      {t.quebra && <JuntasCrossfade t={t} zoom={zoom} />}
       {t.type === 'audio' && <LaneConnectors clips={t.clips} items={libItems} zoom={zoom} top={4 + CLIP_HEAD} height={h - 8 - CLIP_HEAD} color={t.color} covers={coberturas(r, libItems).map((x) => x.at)} />}
       <Envelope t={t} zoom={zoom} width={width} h={h} editing={editEnvelope} drag={drag} setDrag={setDrag} />
+    </div>
+  )
+}
+
+/**
+ * Trilha quebra-cabeça: em cada junta com pulo, uma barra de crossfade no topo, centrada na emenda: a peça anterior sai
+ * e a próxima entra dentro dela (cauda de uma, cabeça da outra, em potência constante). Arrastar a borda direita muda o
+ * tamanho (até 8 s, limitado ao material que os arquivos têm antes e depois); duplo clique zera (corte seco).
+ */
+function JuntasCrossfade({ t, zoom }: { t: ResolvedTrack; zoom: number }) {
+  const project = useEditor((s) => s.project)
+  const [arrasto, setArrasto] = useState<{ id: string; x0: number; len0: number; len: number } | null>(null)
+  if (!project) return null
+  const juntas = t.clips.flatMap((a) => {
+    const b = t.clips.find((x) => x.id !== a.id && Math.abs(x.start - a.bodyEnd) < 0.02)
+    if (!b) return []
+    const corpoA = a.raw.body ?? a.out
+    const vizinho = project.assets[b.asset]?.src === project.assets[a.asset]?.src && Math.abs(b.in - corpoA) < 0.02
+    if (vizinho) return []
+    const sobraA = Math.max(0, (project.assets[a.asset]?.meta?.duration ?? a.out) - corpoA)
+    return [{ a, b, corpoA, len: Math.max(0, a.end - a.bodyEnd) + b.head, max: Math.min(8, 2 * Math.min(sobraA, b.in) || 0.02) }]
+  })
+  // X s centrado na junta: a anterior segue X/2 além do corpo, a próxima começa X/2 antes (cabeça); as duas se cruzam em X
+  const aplica = async (a: ResolvedClip, b: ResolvedClip, corpoA: number, len: number) => {
+    const sobraA = Math.max(0, (project.assets[a.asset]?.meta?.duration ?? a.out) - corpoA)
+    const cauda = Math.min(len / 2, sobraA)
+    const cabeca = Math.min(len / 2, b.in)
+    const L = Math.max(0.01, cauda + cabeca)
+    const pa = P.clip(t.id, a.id)
+    const pb = P.clip(t.id, b.id)
+    const put = (path: string, has: boolean, v: number) => ({ op: has ? 'replace' as const : 'add' as const, path, value: round(v) })
+    await patch([
+      ...(a.raw.body === undefined ? [{ op: 'add' as const, path: `${pa}/body`, value: round(corpoA) }] : []),
+      put(`${pa}/out`, true, corpoA + cauda),
+      put(`${pa}/fade_out`, a.raw.fade_out !== undefined, L),
+      ...(cabeca > 0.0005 ? [put(`${pb}/head`, b.raw.head !== undefined, cabeca)] : b.raw.head !== undefined ? [{ op: 'remove' as const, path: `${pb}/head` }] : []),
+      put(`${pb}/fade_in`, b.raw.fade_in !== undefined, L),
+    ] as never, `Crossfade ${a.id} → ${b.id} ${len.toFixed(2)} s`)
+  }
+  return (<>
+    {juntas.map(({ a, b, corpoA, len, max }) => {
+      const l = arrasto?.id === a.id ? arrasto.len : len
+      const w = Math.max(8, l * zoom)
+      const left = (a.bodyEnd - l / 2) * zoom
+      return (
+        <div key={a.id} className="absolute z-30 select-none" style={{ left: Math.min(left, a.bodyEnd * zoom - 4), top: 1, width: w, height: CLIP_HEAD + 2 }}
+          title={`crossfade de ${l.toFixed(2)} s centrado na junta: ${a.label ?? a.id} sai enquanto ${b.label ?? b.id} entra\narraste a borda direita · duplo clique: corte seco`}
+          onDoubleClick={(e) => { e.stopPropagation(); void aplica(a, b, corpoA, 0) }}>
+          <svg className="absolute inset-0 pointer-events-none" width={w} height={CLIP_HEAD + 2}>
+            <rect x={0} y={0} width={w} height={CLIP_HEAD + 2} rx={3} fill="rgba(255,255,255,0.18)" stroke="rgba(255,255,255,0.75)" strokeWidth={1} />
+            <path d={`M0 ${CLIP_HEAD + 1} L${w} 1 M0 1 L${w} ${CLIP_HEAD + 1}`} stroke="rgba(255,255,255,0.85)" strokeWidth={1} />
+          </svg>
+          {w > 40 && <span className="absolute left-1 top-0 text-[9.5px] font-mono text-white/90 pointer-events-none">{l.toFixed(2)}s</span>}
+          <div className="absolute top-0 bottom-0 -right-1 w-[8px] cursor-ew-resize"
+            onPointerDown={(e) => {
+              e.stopPropagation()
+              ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+              setArrasto({ id: a.id, x0: e.clientX, len0: len, len })
+            }}
+            onPointerMove={(e) => {
+              if (!arrasto || arrasto.id !== a.id) return
+              // a barra cresce para os dois lados: a borda direita anda metade do que o crossfade cresce
+              setArrasto({ ...arrasto, len: Math.min(max, Math.max(0.02, arrasto.len0 + (2 * (e.clientX - arrasto.x0)) / zoom)) })
+            }}
+            onPointerUp={(e) => {
+              e.stopPropagation()
+              if (arrasto?.id === a.id && Math.abs(arrasto.len - len) > 0.005) void aplica(a, b, corpoA, arrasto.len)
+              setArrasto(null)
+            }} />
+        </div>
+      )
+    })}
+  </>)
+}
+
+/**
+ * As peças que o acervo achou na música (quando o arquivo veio de lá): uma fita no topo com a cor da função de cada peça,
+ * o rótulo P<n> · humor dominante, a divisa entre as peças e a curva de energia tracejada. `from` é o tempo do arquivo
+ * no começo do clipe.
+ */
+function AcervoPecas({ src, from, dur, zoom, height }: { src: string; from: number; dur: number; zoom: number; height: number }) {
+  const a = acervoProntas.get(src)
+  if (!a?.pieces.length) return null
+  const vis = a.pieces.map((p, i) => ({ ...p, n: i + 1 })).filter((p) => p.end > from && p.start < from + dur)
+  if (!vis.length) return null
+  const x = (t: number) => (Math.min(Math.max(t, from), from + dur) - from) * zoom
+  const top = CLIP_HEAD + 4
+  const y = (e: number) => top + 16 + (1 - e) * Math.max(4, height - 22)
+  const curva = vis.flatMap((p) => [`${x(p.start)},${y(p.energy)}`, `${x(p.end)},${y(p.energy)}`]).join(' ')
+  return (
+    <div className="absolute inset-0 pointer-events-none">
+      {vis.map((p) => {
+        const l = x(p.start)
+        const w = x(p.end) - l
+        const cor = CORES_FUNCAO[p.role as keyof typeof CORES_FUNCAO] ?? '#8a8f98'
+        const humores = Object.entries(p.moods).sort((m, n) => n[1] - m[1]).map(([k, v]) => `${k} ${v}`).join(' · ')
+        return (
+          <div key={p.n} className="absolute bottom-0 pointer-events-auto" style={{ left: l, width: w, top: CLIP_HEAD }}
+            title={`P${p.n}${p.role ? ` · ${p.role}` : ' (sem compassos: trecho pelo humor)'}${p.mood ? ` · ${p.mood}` : ''}\n${formatTime(p.start, 1)} → ${formatTime(p.end, 1)} do arquivo · energia ${Math.round(p.energy * 100)}${humores ? `\nhumor (percentil no acervo): ${humores}` : ''}`}>
+            <div style={{ height: 4, background: cor }} />
+            {p.start >= from && <div className="absolute top-0 bottom-0 left-0" style={{ borderLeft: `1.5px solid ${alpha(cor, 0.9)}` }} />}
+            {w > 26 && (
+              <div className="absolute left-1 top-[6px] text-[10px] leading-none truncate pl-1 pr-1.5 py-[3px] rounded-sm"
+                style={{ maxWidth: w - 6, background: 'rgba(0,0,0,0.6)', color: '#e8e9ec', borderLeft: `2.5px solid ${cor}` }}>
+                <b className="font-semibold">P{p.n}</b>
+                {p.role && w > 60 && <span className="text-ink-300"> {p.role}</span>}
+                {p.mood && w > 90 && <span className="text-ink-300"> · {p.mood}</span>}
+              </div>
+            )}
+          </div>
+        )
+      })}
+      <svg className="absolute left-0 top-0" width={(dur * zoom) | 0} height={top + height} style={{ overflow: 'visible' }}>
+        <polyline points={curva} fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth={1.2} strokeDasharray="4 3" />
+      </svg>
     </div>
   )
 }
@@ -731,7 +863,8 @@ function TagLane({ r, lane, zoom, width, drag, setDrag, snapTo }: {
     if (e.target !== ref.current || !project) return
     const at = snapTo((e.clientX - ref.current!.getBoundingClientRect().left) / zoom, e.altKey)
     const id = uid('tag', r.regions.map((g) => g.id))
-    const next = { id, start: at, end: round(at + 5), label: 'nova tag', lane }
+    // na faixa Humor, uma tag nova já é um humor da paleta (a cor vem do nome)
+    const next = { id, start: at, end: round(at + 5), label: lane === FAIXA_HUMOR ? HUMORES[0].nome : 'nova tag', lane }
     void patch([{ op: 'add', path: project.regions ? '/regions/-' : '/regions', value: project.regions ? next : [next] }], `New tag ${id}`)
     select({ kind: 'region', regionId: id })
   }
@@ -847,6 +980,8 @@ function TrackMenu({ at, project, close }: { at: { x: number; y: number; trackId
         <>
           <div className="my-1 h-px bg-white/[0.06]" />
           {track.type !== 'bus' && track.type !== 'video' && !isSamplerTrack(track) && item('Importar áudio…', <Icon.Music size={14} />, () => pickAudio(track.id))}
+          {track.type === 'video' && item('Importar foto ou vídeo…', <Icon.Video size={14} />, () => pickPicture(track.id))}
+          {track.type === 'video' && item('Cartão preto no playhead', <Icon.Video size={14} />, () => addCard(track.id))}
           {item('Subir', <Icon.Up size={14} />, () => move(-1), { disabled: idx === 0 })}
           {item('Descer', <span className="inline-block rotate-180"><Icon.Up size={14} /></span>, () => move(1), { disabled: idx === project.tracks.length - 1 })}
           {item('Duplicar', <Icon.Copy size={14} />, duplicate)}
@@ -859,6 +994,35 @@ function TrackMenu({ at, project, close }: { at: { x: number; y: number; trackId
 
 /** What a track accepts when something is dragged onto it: samplers tracks are their own kind. */
 const AUDIO_FILE = /\.(wav|mp3|flac|ogg|m4a|aac|aif|aiff|opus)$/i
+const PICTURE_FILE = /\.(jpe?g|png|webp|gif|avif|bmp|tiff?|mp4|mov|webm|mkv|m4v)$/i
+
+/** Fotos e vídeos do computador, na trilha de vídeo, a partir do playhead (uma foto a cada 4 s). */
+function pickPicture(trackId: string) {
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = 'image/*,video/*'
+  input.multiple = true
+  input.onchange = async () => {
+    let at = useEditor.getState().playhead
+    for (const f of [...(input.files ?? [])]) {
+      await importAudio(f, trackId, at)
+      at += 4
+    }
+  }
+  input.click()
+}
+
+/** Um cartão chapado (preto) de 2 s no playhead. */
+function addCard(trackId: string) {
+  const p = useEditor.getState().project
+  const track = p?.tracks.find((t) => t.id === trackId)
+  if (!p || !track) return
+  const ids = new Set(p.tracks.flatMap((t) => (t.clips ?? []).map((c) => c.id)))
+  let n = 1
+  while (ids.has(`cartao-${n}`)) n++
+  const value = { id: `cartao-${n}`, type: 'color', start: Math.round(useEditor.getState().playhead * 1000) / 1000, duration: 2, fill: '#000000' }
+  void patch([track.clips ? { op: 'add', path: `${P.track(trackId)}/clips/-`, value } : { op: 'add', path: `${P.track(trackId)}/clips`, value: [value] }] as never, 'Novo cartão')
+}
 
 /** The file picker: the chosen files land on the track at the playhead. */
 function pickAudio(trackId: string) {
@@ -872,6 +1036,6 @@ function pickAudio(trackId: string) {
   input.click()
 }
 
-function kindOf(t: { type: string; samplers: boolean }) {
-  return t.samplers ? 'samplers' : t.type
+function kindOf(t: { type: string; samplers: boolean; quebra?: boolean }) {
+  return t.samplers ? 'samplers' : t.quebra ? 'quebra' : t.type
 }

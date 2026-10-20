@@ -47,7 +47,7 @@ const KEY_ORDER: Record<string, string[]> = {
   region: ['id', 'start', 'end', 'label', 'lane', 'color', 'note'],
   project: ['id', 'name', 'sample_rate', 'bpm', 'meter', 'grid_offset', 'duration'],
   track: ['id', 'type', 'name', 'color', 'volume', 'pan', 'muted', 'solo', 'output', 'note', 'effects', 'automation', 'clips'],
-  clip: ['id', 'asset', 'start', 'in', 'out', 'gain', 'fade_in', 'fade_out', 'label', 'color', 'muted', 'note'],
+  clip: ['id', 'type', 'asset', 'start', 'in', 'out', 'duration', 'gain', 'fade_in', 'fade_out', 'fill', 'transform', 'crop', 'opacity', 'effects', 'transition', 'transition_out', 'params', 'label', 'color', 'muted', 'note'],
   asset: ['src', 'label', 'body', 'meta'],
   marker: ['id', 'at', 'label', 'color'],
   master: ['volume', 'loudness', 'effects', 'automation'],

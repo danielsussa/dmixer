@@ -1,8 +1,8 @@
 import {
-  audibleTracks, dbToGain, duckDbAt, duckRegions, envelopeAt, freeverbImpulse, processingOrder,
-  type Effect, type ResolvedPoint, type ResolvedProject,
+  atenuacaoEm, audibleTracks, dbToGain, duckDbAt, duckRegions, envelopeAt, ESPECTRAL_BANDAS, ESPECTRAL_FATOR, ESPECTRAL_Q, freeverbImpulse,
+  mascaraDoJson, processingOrder, type Effect, type MascaraEspectral, type ResolvedPoint, type ResolvedProject,
 } from '@dmixer/core'
-import { mediaUrl } from './api'
+import { currentId, mediaUrl } from './api'
 import { diag } from './diag'
 import { useEditor } from './store'
 
@@ -43,7 +43,8 @@ class Engine {
   private decoded = new Map<string, number>()
   private scheduled = new Set<string>()
   private graph: { r: ResolvedProject; inputs: Map<string, GainNode>; heard: Set<string>; t0: number; from: number; session: number } | null = null
-  private lastFeed = 0
+  /** relógio do próprio áudio: com a tela bloqueada o requestAnimationFrame para, mas o contexto continua */
+  private pumpNode: ConstantSourceNode | null = null
 
   private ensure() {
     if (!this.ctx) {
@@ -159,6 +160,8 @@ class Engine {
       throw e
     }
     useEditor.getState().setState({ playing: true })
+    this.mediaSession(true)
+    this.pump()
     this.tick()
     diag('started', { state: ctx.state, time: ctx.currentTime, files: srcs.length })
     for (const ms of [500, 2000, 5000]) setTimeout(() => {
@@ -285,6 +288,7 @@ class Engine {
     const pos = this.position
     this.teardown()
     this.silent?.pause()
+    this.mediaSession(false)
     useEditor.getState().setState({ playing: false, meter: -120 })
     useEditor.getState().setPlayhead(pos)
   }
@@ -299,6 +303,12 @@ class Engine {
 
   private teardown() {
     cancelAnimationFrame(this.raf)
+    if (this.pumpNode) {
+      this.pumpNode.onended = null
+      try { this.pumpNode.stop() } catch { /* already stopped */ }
+      this.pumpNode.disconnect()
+      this.pumpNode = null
+    }
     for (const s of this.sources) {
       try { s.stop() } catch { /* already stopped */ }
       s.disconnect()
@@ -316,7 +326,7 @@ class Engine {
     if (!g) return
     for (const t of g.r.tracks) {
       if (t.type === 'bus' || !g.heard.has(t.id)) continue
-      for (const c of t.clips) if (c.end > pos && c.start < pos + AHEAD) this.schedule(t.id, c, g)
+      for (const c of t.clips) if (c.end > pos && c.start - c.head < pos + AHEAD) this.schedule(t.id, c, g)
     }
     let total = 0
     for (const d of this.decoded.values()) total += d
@@ -341,20 +351,38 @@ class Engine {
       src.buffer = buf
       const gn = ctx.createGain()
       const peak = dbToGain(c.gain)
-      let when = g.t0 + Math.max(0, c.start - g.from)
-      let skip = Math.max(0, g.from - c.start)
+      // a cabeça (quebra-cabeça): o som começa `head` s antes do início visível, com o material de antes do trecho
+      const ini = c.start - c.head
+      const offset0 = c.in - c.head
+      let when = g.t0 + Math.max(0, ini - g.from)
+      let skip = Math.max(0, g.from - ini)
       const late = ctx.currentTime + 0.02 - when
       if (late > 0) { skip += late; when += late }   // chegou atrasado: entra no ponto certo, não do começo
-      const dur = c.duration - skip
+      const dur = c.duration + c.head - skip
       if (dur <= 0) return
-      gn.gain.setValueAtTime(skip > 0 && skip >= c.fadeIn ? peak : 0, when)
-      if (skip < c.fadeIn) gn.gain.linearRampToValueAtTime(peak, when + (c.fadeIn - skip))
-      const foStart = when + dur - c.fadeOut
-      if (foStart > when) gn.gain.setValueAtTime(peak, foStart)
-      gn.gain.linearRampToValueAtTime(0, when + dur)
+      if (c.equalPower && (c.fadeIn > 0.05 || c.fadeOut > 0.05)) {
+        // crossfade em potência constante (seno/cosseno): a soma das duas peças não afunda no meio da junta
+        const pts = Math.max(2, Math.ceil(dur * 200))
+        const curve = new Float32Array(pts)
+        for (let i = 0; i < pts; i++) {
+          const k = skip + (i / (pts - 1)) * dur
+          let v = peak
+          if (k < c.fadeIn) v *= Math.sin(((k / c.fadeIn) * Math.PI) / 2)
+          const resto = c.duration + c.head - k
+          if (resto < c.fadeOut) v *= Math.sin(((Math.max(0, resto) / c.fadeOut) * Math.PI) / 2)
+          curve[i] = v
+        }
+        gn.gain.setValueCurveAtTime(curve, when, dur)
+      } else {
+        gn.gain.setValueAtTime(skip > 0 && skip >= c.fadeIn ? peak : 0, when)
+        if (skip < c.fadeIn) gn.gain.linearRampToValueAtTime(peak, when + (c.fadeIn - skip))
+        const foStart = when + dur - c.fadeOut
+        if (foStart > when) gn.gain.setValueAtTime(peak, foStart)
+        gn.gain.linearRampToValueAtTime(0, when + dur)
+      }
       src.connect(gn).connect(input)
       try {
-        src.start(when, c.in + skip, dur)
+        src.start(when, offset0 + skip, dur)
       } catch (e) {
         diag('start failed', { clip: c.id, when, offset: c.in + skip, dur, now: ctx.currentTime, error: String(e) })
         return
@@ -376,15 +404,61 @@ class Engine {
       for (const v of a) sum += v * v
       s.setState({ meter: 10 * Math.log10(sum / a.length + 1e-12) })
     }
-    if (performance.now() - this.lastFeed > 1000) {
-      this.lastFeed = performance.now()
-      this.feed(pos)
-    }
+    this.raf = requestAnimationFrame(this.tick)
+  }
+
+  /**
+   * Agenda os próximos clipes uma vez por segundo, contado pelo relógio do áudio (o `onended` de uma fonte muda):
+   * timers e requestAnimationFrame congelam com a tela bloqueada, e aí a mix calava depois dos AHEAD s já agendados.
+   */
+  private pump = () => {
+    const s = useEditor.getState()
+    const g = this.graph
+    if (!s.playing || !g || !this.ctx) return
+    const pos = this.position
     if (s.resolved && pos > s.resolved.duration + 3) {
       this.stop()
       return
     }
-    this.raf = requestAnimationFrame(this.tick)
+    this.feed(pos)
+    const ctx = this.ctx
+    const n = ctx.createConstantSource()
+    const mute = ctx.createGain()
+    mute.gain.value = 0
+    n.connect(mute).connect(ctx.destination)   // fonte solta não é processada em todo navegador
+    n.onended = () => {
+      n.disconnect()
+      mute.disconnect()
+      if (this.pumpNode !== n) return
+      this.pumpNode = null
+      this.pump()
+    }
+    n.start()
+    n.stop(ctx.currentTime + 1)
+    this.pumpNode = n
+  }
+
+  /** Controles na tela de bloqueio, e o sistema trata a página como player (menos chance de suspender). */
+  private mediaSession(playing: boolean) {
+    const ms = navigator.mediaSession
+    if (!ms) return
+    try {
+      const p = useEditor.getState().projects.find((x) => x.id === currentId())
+      if (playing && typeof MediaMetadata !== 'undefined') ms.metadata = new MediaMetadata({ title: p?.name ?? 'dmixer', artist: 'dmixer' })
+      ms.playbackState = playing ? 'playing' : 'paused'
+      ms.setActionHandler('play', () => { if (!useEditor.getState().playing) void this.play() })
+      ms.setActionHandler('pause', () => { if (useEditor.getState().playing) this.stop() })
+      ms.setActionHandler('stop', () => { if (useEditor.getState().playing) this.stop() })
+    } catch { /* ação não suportada */ }
+  }
+
+  /** Volta da tela bloqueada: se o sistema suspendeu o contexto no meio, retoma e reagenda do ponto certo. */
+  wake() {
+    const ctx = this.ctx
+    diag('visible', { state: ctx?.state, playing: useEditor.getState().playing, hidden: document.hidden })
+    if (!ctx || document.hidden || !useEditor.getState().playing) return
+    if (ctx.state !== 'running') void this.refresh()
+    else this.feed(this.position)
   }
 
   private build(r: ResolvedProject, from: number) {
@@ -410,7 +484,7 @@ class Engine {
     for (const t of processingOrder(r.tracks)) {
       if (!heard.has(t.id)) continue
       const input = inputs.get(t.id)!
-      const fx = this.chain(input, t.effects, r, from, t0)
+      const fx = this.chain(input, t.effects, r, from, t0, t.id)
       const vol = this.gain(t.volume, t.envelope, from, t0, r.duration)
       const pan = keep(ctx.createStereoPanner())
       pan.pan.value = t.pan
@@ -418,7 +492,6 @@ class Engine {
       const dest = t.output ? (heard.has(t.output) ? inputs.get(t.output) : null) : masterIn
       if (dest) pan.connect(dest)
     }
-    this.lastFeed = performance.now()
     this.feed(from)
   }
 
@@ -439,11 +512,38 @@ class Engine {
     return g
   }
 
-  private chain(input: AudioNode, effects: Effect[], r: ResolvedProject, from: number, t0: number): AudioNode {
+  /** a tabela do duck espectral vem do servidor (a mesma do render); guardada por faixa + efeito + estado da mix */
+  private mascaras = new Map<string, Promise<MascaraEspectral | null>>()
+
+  private mascara(track: string, fx: number, r: ResolvedProject): Promise<MascaraEspectral | null> {
+    const t = r.tracks.find((x) => x.id === track)
+    const e = t?.effects[fx]
+    const src = e && e.type === 'espectral' ? r.tracks.find((x) => x.id === e.source) : undefined
+    // muda a faixa, a voz ou os parâmetros: outra tabela
+    const key = JSON.stringify([track, fx, e, t?.clips, t?.effects.slice(0, fx), t?.volume, t?.envelope, src?.clips, src?.volume, src?.envelope])
+    let p = this.mascaras.get(key)
+    if (!p) {
+      const c = currentId()
+      p = fetch(`/api/espectral?${c ? `c=${encodeURIComponent(c)}&` : ''}track=${encodeURIComponent(track)}&fx=${fx}`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((j) => (j ? mascaraDoJson(j) : null))
+        .catch(() => null)
+      if (this.mascaras.size > 8) this.mascaras.clear()
+      this.mascaras.set(key, p)
+      void p.then((m) => { if (!m) this.mascaras.delete(key) })
+    }
+    return p
+  }
+
+  private bandasEspectral(): number[] {
+    return ESPECTRAL_BANDAS
+  }
+
+  private chain(input: AudioNode, effects: Effect[], r: ResolvedProject, from: number, t0: number, track?: string): AudioNode {
     const ctx = this.ctx!
     let cur: AudioNode = input
     const keep = <T extends AudioNode>(n: T) => (this.nodes.push(n), n)
-    for (const e of effects) {
+    for (const [index, e] of effects.entries()) {
       if (e.bypass) continue
       switch (e.type) {
         case 'highpass':
@@ -499,6 +599,35 @@ class Engine {
           cur = cur.connect(g)
           break
         }
+        case 'espectral': {
+          if (!track) break
+          // o banco de peaking entra já (neutro); as curvas de ganho entram quando a tabela chega
+          const filtros = (this.bandasEspectral()).map((f) => {
+            const b = keep(ctx.createBiquadFilter())
+            b.type = 'peaking'
+            b.frequency.value = f
+            b.Q.value = ESPECTRAL_Q
+            b.gain.value = 0
+            cur = cur.connect(b)
+            return b
+          })
+          const session = this.ticket
+          void this.mascara(track, index, r).then((m) => {
+            if (!m || session !== this.ticket || !this.ctx) return
+            const rate = 1 / m.passo
+            const agora = Math.max(t0, this.ctx.currentTime + 0.05)
+            const desde = from + (agora - t0)
+            const len = Math.max(2, Math.ceil((r.duration + 3 - desde) * rate))
+            const att = new Float32Array(m.bandas.length)
+            const curvas = filtros.map(() => new Float32Array(len))
+            for (let i = 0; i < len; i++) {
+              atenuacaoEm(m, desde + i / rate, att)
+              for (let b = 0; b < filtros.length; b++) curvas[b][i] = -att[b] * ESPECTRAL_FATOR
+            }
+            filtros.forEach((f, b) => f.gain.setValueCurveAtTime(curvas[b], agora, len / rate))
+          })
+          break
+        }
         case 'reverb': {
           const key = `${ctx.sampleRate}:${e.seconds ?? 2.5}`
           let ir = this.irs.get(key)
@@ -529,3 +658,4 @@ class Engine {
 }
 
 export const engine = new Engine()
+document.addEventListener('visibilitychange', () => engine.wake())

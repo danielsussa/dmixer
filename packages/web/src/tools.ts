@@ -1,5 +1,5 @@
-import { juntarTrechos, round, subidasNasPausas, type Project, type ResolvedClip, type ResolvedProject } from '@dmixer/core'
-import { analisesProntas, gradeDaMusica, loadSpeech, P, patch } from './api'
+import { clipesDaRemontagem, juntarTrechos, round, subidasNasPausas, type Pecas, type Project, type Remontagem, type ResolvedClip, type ResolvedProject } from '@dmixer/core'
+import { acervoProntas, analisesProntas, gradeDaMusica, loadSpeech, P, patch } from './api'
 import { isLibraryPiece } from './components/Library'
 import { useEditor } from './store'
 
@@ -48,6 +48,41 @@ function targets(r: ResolvedProject, at: number) {
   if (sel?.kind === 'clip') return r.tracks.filter((t) => t.id === sel.trackId).flatMap((t) => t.clips.filter((c) => c.id === sel.clipId && under(c)))
   if (sel?.kind === 'track') return r.tracks.filter((t) => t.id === sel.trackId).flatMap((t) => t.clips.filter(under))
   return r.tracks.filter((t) => t.type !== 'bus').flatMap((t) => t.clips.filter(under))
+}
+
+/**
+ * Separa uma música do acervo nas peças dela: o clipe é cortado em cada divisa de peça que cai dentro dele, e cada pedaço
+ * vira um clipe independente (id <clipe>-p<n>, rótulo "P<n> função · humor"). Cortes secos, como no Dividir: o primeiro
+ * guarda o fade-in e o último o fade-out.
+ */
+export async function separarPecas(trackId: string, clipId: string) {
+  const { project, resolved } = useEditor.getState()
+  if (!project || !resolved) return
+  const c = resolved.tracks.find((t) => t.id === trackId)?.clips.find((x) => x.id === clipId)
+  const a = c && acervoProntas.get(c.src)
+  if (!c || !a?.pieces.length) return
+  const dentro = a.pieces.map((p, i) => ({ ...p, n: i + 1 })).filter((p) => p.end > c.in + MIN && p.start < c.out - MIN)
+  if (dentro.length < 2) return alert('Este clipe está dentro de uma peça só: não há o que separar.')
+  const taken = new Set(project.tracks.flatMap((t) => (t.clips ?? []).map((x) => x.id)))
+  taken.delete(c.id)
+  const idx = (project.tracks.find((t) => t.id === trackId)?.clips ?? []).findIndex((x) => x.id === c.id)
+  const { fade_in, fade_out, label: _l, ...rest } = c.raw
+  const novos = dentro.map((p, k) => {
+    const ini = Math.max(c.in, p.start)
+    const fim = Math.min(c.out, p.end)
+    const v: Record<string, unknown> = {
+      ...rest, id: taken.has(`${c.id}-p${p.n}`) ? freshId(taken, `${c.id}-p${p.n}-1`) : `${c.id}-p${p.n}`, start: round(c.start + (ini - c.in)), in: round(ini), out: round(fim),
+      label: `P${p.n}${p.role ? ` ${p.role}` : ''}${p.mood ? ` · ${p.mood}` : ''}`,
+    }
+    taken.add(v.id as string)
+    if (k === 0 && fade_in !== undefined) v.fade_in = fade_in
+    if (k === dentro.length - 1 && fade_out !== undefined) v.fade_out = fade_out
+    return v
+  })
+  const ops: Op[] = [{ op: 'replace', path: P.clip(trackId, c.id), value: novos[0] } as Op]
+  novos.slice(1).forEach((v, k) => ops.push({ op: 'add', path: `${P.track(trackId)}/clips/${idx + 1 + k}`, value: v } as Op))
+  await patch(ops as never, `Separar ${c.id} em ${novos.length} peças`)
+  useEditor.getState().select({ kind: 'clip', trackId, clipId: novos[0].id as string })
 }
 
 export async function splitAt(at: number, only?: { trackId: string; clipId: string }) {
@@ -349,4 +384,69 @@ export async function mixarAutomatico(): Promise<string> {
   if (!ops.length) return 'nenhuma trilha com duck (o duck diz qual trilha é a voz)'
   await patch(ops as never, 'Mixar: subidas nas pausas da locução')
   return feitos.join(' · ')
+}
+
+/**
+ * O trecho de uma música que uma remontagem substitui: o clipe e os pedaços da mesma música encostados nele na trilha
+ * (uma remontagem anterior, ou cortes feitos à mão), em ordem de tempo.
+ */
+export function trechoDaMusica(r: ResolvedProject, trackId: string, clipId: string): ResolvedClip[] {
+  const t = r.tracks.find((x) => x.id === trackId)
+  const c = t?.clips.find((x) => x.id === clipId)
+  if (!t || !c) return []
+  const irmaos = t.clips.filter((x) => x.src === c.src).sort((a, b) => a.start - b.start)
+  const k = irmaos.findIndex((x) => x.id === c.id)
+  let i0 = k
+  let i1 = k
+  while (i0 > 0 && Math.abs(irmaos[i0].start - irmaos[i0 - 1].end) < 0.15) i0--
+  while (i1 + 1 < irmaos.length && Math.abs(irmaos[i1 + 1].start - irmaos[i1].end) < 0.15) i1++
+  return irmaos.slice(i0, i1 + 1)
+}
+
+/**
+ * Aplica uma remontagem: o trecho da música (trechoDaMusica) vira um clipe por peça, a partir de onde ele começava
+ * (mais `desloca`, para um pico cair num marcador). O que vem depois na trilha anda junto. Um passo de desfazer.
+ */
+export async function aplicarRemontagem(trackId: string, clipId: string, pecas: Pecas, r: Remontagem, desloca = 0): Promise<string> {
+  const { project, resolved } = useEditor.getState()
+  if (!project || !resolved) return ''
+  const trecho = trechoDaMusica(resolved, trackId, clipId)
+  const raw = project.tracks.find((t) => t.id === trackId)
+  const t = resolved.tracks.find((x) => x.id === trackId)
+  if (!trecho.length || !raw || !t) return 'clipe não encontrado'
+  const ini = trecho[0].start + desloca
+  const fimAntes = trecho[trecho.length - 1].end
+  const asset = trecho[0].asset
+  const taken = new Set(project.tracks.flatMap((x) => (x.clips ?? []).map((c) => c.id)))
+  let n = 1
+  const ids = r.seq.map(() => { while (taken.has(`${asset}-p${n}`)) n++; taken.add(`${asset}-p${n}`); return `${asset}-p${n}` })
+  const clips = clipesDaRemontagem(pecas, r, { asset, start: ini, ids, gain: trecho[0].raw.gain, fadeFinal: 2 })
+  // para adiantar (o pico cair antes), a primeira peça perde o começo: ela entra mais adiante, no lugar de antes, com fade
+  const apara = Math.max(0, trecho[0].start - ini, -ini)
+  if (apara > 0) {
+    const c0 = clips[0]
+    if (apara > c0.out! - (c0.in ?? 0) - 1) return `o pico não alinha: teria de tirar ${apara.toFixed(1)} s da primeira peça, que é mais curta`
+    c0.in = round((c0.in ?? 0) + apara)
+    c0.start = round((c0.start as number) + apara)
+    c0.fade_in = round(Math.min(0.5, apara))
+    c0.note = `${c0.note} · começo aparado ${apara.toFixed(1)} s para o pico cair no marcador`
+  }
+  const ultimo = clips[clips.length - 1]
+  const fimDepois = (ultimo.start as number) + (ultimo.out! - (ultimo.in ?? 0))
+  const fora = new Set(trecho.map((c) => c.id))
+  const ops: Op[] = []
+  for (const c of trecho) ops.push({ op: 'remove', path: P.clip(trackId, c.id) })
+  // o que vinha depois do trecho anda com a diferença de duração
+  for (const o of t.clips) {
+    if (!fora.has(o.id) && o.start >= fimAntes - MIN && typeof o.raw.start === 'number') ops.push({ op: 'replace', path: `${P.clip(trackId, o.id)}/start`, value: round(o.raw.start + fimDepois - fimAntes) })
+  }
+  const resto = (raw.clips ?? []).filter((c) => !fora.has(c.id))
+  const inicioDe = new Map(t.clips.map((c) => [c.id, c.start]))
+  let at = resto.findIndex((c) => (inicioDe.get(c.id) ?? 0) > trecho[0].start)
+  if (at < 0) at = resto.length
+  clips.forEach((c, k) => ops.push({ op: 'add', path: `${P.track(trackId)}/clips/${at + k}`, value: c }))
+  await patch(ops as never, `Remontar ${asset}: ${clips.length} peças, ${r.duracao.toFixed(1)} s`)
+  useEditor.getState().select({ kind: 'clip', trackId, clipId: ids[0] })
+  const novas = r.emendas.filter((e) => e !== null && e < 0.999).length
+  return `${clips.length} peças, ${novas} emendas novas`
 }

@@ -6,7 +6,9 @@ import type { AssetMeta } from '@dmixer/core'
 
 export const AUDIO_EXTENSIONS = /\.(wav|mp3|flac|ogg|m4a|aac|aif|aiff|opus)$/i
 export const VIDEO_EXTENSIONS = /\.(mp4|mov|webm|mkv|m4v)$/i
-export const MEDIA_EXTENSIONS = /\.(wav|mp3|flac|ogg|m4a|aac|aif|aiff|opus|mp4|mov|webm|mkv|m4v)$/i
+export const IMAGE_EXTENSIONS = /\.(jpe?g|png|webp|gif|avif|bmp|tiff?)$/i
+export const PAGE_EXTENSIONS = /\.html?$/i
+export const MEDIA_EXTENSIONS = /\.(wav|mp3|flac|ogg|m4a|aac|aif|aiff|opus|mp4|mov|webm|mkv|m4v|jpe?g|png|webp|gif|avif|bmp|tiff?)$/i
 
 function run(cmd: string, args: string[], { binary = false } = {}): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -33,6 +35,8 @@ export async function fingerprint(file: string): Promise<{ hash: string; size: n
 }
 
 export async function probe(file: string): Promise<AssetMeta> {
+  // uma página html (título animado) não tem o que o ffprobe medir: só a impressão digital
+  if (PAGE_EXTENSIONS.test(file)) return fingerprint(file)
   const out = await run('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,channels,sample_rate,width,height,avg_frame_rate:format=duration', '-of', 'json', file])
   const j = JSON.parse(out.toString())
   const streams: any[] = j.streams ?? []
@@ -45,6 +49,10 @@ export async function probe(file: string): Promise<AssetMeta> {
     meta.sample_rate = Number(a.sample_rate ?? 44100)
   }
   // a still image inside an mp3 (cover art) is a "video" stream too; only real video files count
+  if (v && IMAGE_EXTENSIONS.test(file)) {
+    // uma foto: só o tamanho; a duração é a do clipe
+    return { size, hash, width: Number(v.width), height: Number(v.height) }
+  }
   if (v && VIDEO_EXTENSIONS.test(file)) {
     meta.width = Number(v.width)
     meta.height = Number(v.height)
@@ -67,7 +75,8 @@ export async function thumbnail(file: string, t: number, cacheDir: string): Prom
     /* make it */
   }
   await fs.mkdir(cacheDir, { recursive: true })
-  await run('ffmpeg', ['-v', 'error', '-y', '-ss', String(at), '-i', file, '-frames:v', '1', '-vf', 'scale=-2:120', '-q:v', '5', out])
+  const still = IMAGE_EXTENSIONS.test(file)
+  await run('ffmpeg', ['-v', 'error', '-y', ...(still ? [] : ['-ss', String(at)]), '-i', file, '-frames:v', '1', '-vf', 'scale=-2:120', '-q:v', '5', out])
   return out
 }
 

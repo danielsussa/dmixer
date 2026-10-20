@@ -1,11 +1,15 @@
+import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import {
-  applyBiquad, audibleTracks, biquad, dbToGain, duckDbAt, duckRegions, envelopeAt, freeverbWet, panGains,
-  processingOrder, resolveProject, type Effect, type Project, type ResolvedPoint, type ResolvedProject, type ResolvedTrack,
+  applyBiquad, atenuacaoEm, audibleTracks, biquad, dbToGain, duckDbAt, duckRegions, envelopeAt, ESPECTRAL_FATOR, ESPECTRAL_Q,
+  freeverbWet, mascaraDoJson, mascaraParaJson, panGains, processingOrder, resolveProject, type Effect, type MascaraEspectral,
+  type Project, type ResolvedPoint, type ResolvedProject, type ResolvedTrack,
 } from '@dmixer/core'
+import { calcularMascara } from './espectral.js'
 import { decode, run, runStderr } from './media.js'
 import type { Workspace } from './workspace.js'
+import { composeVideo } from './video.js'
 
 export interface RenderOptions {
   out: string
@@ -65,6 +69,15 @@ export async function renderMix(project: Project, ws: Workspace, opts: RenderOpt
     return b
   }
 
+  // duck espectral: a máscara de cada faixa sai da faixa e da voz inteiras (a mesma do preview), não só do trecho
+  const mascaras = new Map<string, MascaraEspectral>()
+  for (const t of order) {
+    if (!heard.has(t.id)) continue
+    for (const [i, e] of t.effects.entries()) {
+      if (e.type === 'espectral' && !e.bypass) mascaras.set(`${t.id}:${i}`, await mascaraDaFaixa(project, ws, t.id, i, load))
+    }
+  }
+
   let done = 0
   for (const t of order) {
     progress(done / (order.length + 1), t.name)
@@ -80,7 +93,7 @@ export async function renderMix(project: Project, ws: Workspace, opts: RenderOpt
         await placeClip(buf, await load(c.src), c, from, sr)
       }
     }
-    applyEffects(buf, t.effects, r, from, sr)
+    applyEffects(buf, t.effects, r, from, sr, (i) => mascaras.get(`${t.id}:${i}`))
     applyGain(buf, t.volume, t.envelope, from, sr)
     const dest = t.output && heard.has(t.output) ? busOf(t.output) : t.output ? null : master
     if (dest) mixInto(dest, buf, t.pan)
@@ -120,7 +133,7 @@ export async function renderMix(project: Project, ws: Workspace, opts: RenderOpt
   await fs.rm(wav, { force: true })
   if (isVideo) {
     progress(0.97, 'video')
-    await composeVideo(r, ws, project.media ?? {}, audioOut, opts.out, from, N / sr)
+    await composeVideo(r, project.assets, ws, project.media ?? {}, audioOut, opts.out, from, N / sr)
     await fs.rm(audioOut, { force: true })
   }
   progress(1, 'done')
@@ -129,11 +142,13 @@ export async function renderMix(project: Project, ws: Workspace, opts: RenderOpt
 
 async function placeClip(buf: Stereo, src: Stereo, c: ResolvedTrack['clips'][number], from: number, sr: number) {
   const g = dbToGain(c.gain)
-  const s0 = Math.round(c.in * sr)
-  const len = Math.round(c.duration * sr)
-  const at = Math.round((c.start - from) * sr)
+  // a cabeça (quebra-cabeça): o som começa antes do início visível, com o material de antes do trecho no arquivo
+  const s0 = Math.round((c.in - c.head) * sr)
+  const len = Math.round((c.duration + c.head) * sr)
+  const at = Math.round((c.start - c.head - from) * sr)
   const fi = Math.max(1, Math.round(c.fadeIn * sr))
   const fo = Math.max(1, Math.round(c.fadeOut * sr))
+  const curva = (x: number) => (c.equalPower ? Math.sin((x * Math.PI) / 2) : x)   // potência constante: o crossfade não afunda
   const N = buf[0].length
   for (let k = 0; k < len; k++) {
     const i = at + k
@@ -142,8 +157,8 @@ async function placeClip(buf: Stereo, src: Stereo, c: ResolvedTrack['clips'][num
     const j = s0 + k
     if (j >= src[0].length) break
     let gk = g
-    if (k < fi) gk *= k / fi
-    if (len - k < fo) gk *= (len - k) / fo
+    if (k < fi) gk *= curva(k / fi)
+    if (len - k < fo) gk *= curva((len - k) / fo)
     buf[0][i] += src[0][j] * gk
     buf[1][i] += src[1][j] * gk
   }
@@ -185,8 +200,9 @@ function mixInto(dest: Stereo, src: Stereo, pan: number) {
   }
 }
 
-export function applyEffects(buf: Stereo, effects: Effect[], r: ResolvedProject, from: number, sr: number) {
-  for (const e of effects) {
+export function applyEffects(buf: Stereo, effects: Effect[], r: ResolvedProject, from: number, sr: number,
+  mascara: (index: number) => MascaraEspectral | undefined = () => undefined) {
+  for (const [index, e] of effects.entries()) {
     if (e.bypass) continue
     switch (e.type) {
       case 'highpass':
@@ -230,6 +246,11 @@ export function applyEffects(buf: Stereo, effects: Effect[], r: ResolvedProject,
         }
         break
       }
+      case 'espectral': {
+        const m = mascara(index)
+        if (m) aplicarEspectral(buf, m, from, sr)
+        break
+      }
       case 'reverb': {
         const [wl, wr] = freeverbWet(buf[0], buf[1], sr, e.seconds ?? 2.5)
         const dry = 1 - e.mix
@@ -240,6 +261,109 @@ export function applyEffects(buf: Stereo, effects: Effect[], r: ResolvedProject,
         break
       }
     }
+  }
+}
+
+/**
+ * O banco de peaking do duck espectral, com o ganho de cada banda mudando a cada bloco (como o BiquadFilterNode do
+ * preview faz a cada quantum). Bloco sem atenuação nenhuma passa direto, só levando o estado dos filtros adiante.
+ */
+function aplicarEspectral(buf: Stereo, m: MascaraEspectral, from: number, sr: number) {
+  const nb = m.bandas.length
+  const att = new Float32Array(nb)
+  const st = Array.from({ length: nb * 2 }, () => ({ x1: 0, x2: 0, y1: 0, y2: 0 }))
+  const N = buf[0].length
+  const B = 128
+  for (let b0 = 0; b0 < N; b0 += B) {
+    const end = Math.min(N, b0 + B)
+    atenuacaoEm(m, from + (b0 + B / 2) / sr, att)
+    for (let b = 0; b < nb; b++) {
+      const g = -att[b] * ESPECTRAL_FATOR
+      for (let ch = 0; ch < 2; ch++) {
+        const x = buf[ch]
+        const s = st[b * 2 + ch]
+        if (g > -0.01) {   // filtro neutro: y = x
+          if (end - b0 >= 2) { s.x1 = s.y1 = x[end - 1]; s.x2 = s.y2 = x[end - 2] }
+          continue
+        }
+        const c = biquad('peaking', m.bandas[b], sr, ESPECTRAL_Q, g)
+        let { x1, x2, y1, y2 } = s
+        for (let i = b0; i < end; i++) {
+          const v = x[i]
+          const y = c.b0 * v + c.b1 * x1 + c.b2 * x2 - c.a1 * y1 - c.a2 * y2
+          x2 = x1; x1 = v; y2 = y1; y1 = y
+          x[i] = y
+        }
+        Object.assign(s, { x1, x2, y1, y2 })
+      }
+    }
+  }
+}
+
+const mascarasEmCurso = new Map<string, Promise<MascaraEspectral>>()
+
+/**
+ * A máscara do efeito `espectral` (índice `fx`) da faixa: a faixa (com os efeitos de antes, o volume e a automação) e
+ * a voz da `source` (os clipes, mesmo com a faixa mutada, como o duck), a mix inteira. Fica em cache no disco pela
+ * soma do que entra nela.
+ */
+export async function mascaraDaFaixa(project: Project, ws: Workspace, trackId: string, fx: number,
+  load?: (src: string) => Promise<Stereo>): Promise<MascaraEspectral> {
+  const r = resolveProject(project)
+  const sr = r.sampleRate
+  const t = r.tracks.find((x) => x.id === trackId)
+  const e = t?.effects[fx]
+  if (!t || !e || e.type !== 'espectral') throw new Error(`faixa ${trackId} não tem duck espectral em ${fx}`)
+  const src = r.tracks.find((x) => x.id === e.source)
+  if (!src) throw new Error(`duck espectral: a fonte ${e.source} não é uma faixa`)
+  const snr = e.snr ?? 12
+  const max = e.max ?? 7
+  const N = Math.ceil((r.duration + TAIL) * sr)
+  const arquivos = [...new Set([...t.clips, ...src.clips].filter((c) => c.src).map((c) => c.src!))]
+  const mtimes = await Promise.all(arquivos.map((a) => fs.stat(ws.resolveMedia(a, project.media ?? {})).then((x) => x.mtimeMs, () => 0)))
+  const chave = createHash('sha1').update(JSON.stringify({
+    v: 1, sr, N, snr, max, arquivos, mtimes,
+    faixa: { clips: t.clips, effects: t.effects.slice(0, fx), volume: t.volume, envelope: t.envelope },
+    fonte: { clips: src.clips, effects: src.effects, volume: src.volume, envelope: src.envelope },
+  })).digest('hex')
+  const arq = path.join(ws.cacheDir, 'espectral', `${chave}.json`)
+  const pronta = mascarasEmCurso.get(chave)
+  if (pronta) return pronta
+  const p = (async () => {
+    try {
+      return mascaraDoJson(JSON.parse(await fs.readFile(arq, 'utf8')))
+    } catch { /* ainda não calculada */ }
+    const carregadas = new Map<string, Stereo>()
+    const carregar = load ?? (async (s: string) => {
+      let d = carregadas.get(s)
+      if (!d) carregadas.set(s, (d = await decode(ws.resolveMedia(s, project.media ?? {}), sr)))
+      return d
+    })
+    const mono = async (tr: ResolvedTrack, effects: Effect[]): Promise<Float32Array> => {
+      const buf: Stereo = [new Float32Array(N), new Float32Array(N)]
+      for (const c of tr.clips) {
+        if (c.muted || !c.src) continue
+        await placeClip(buf, await carregar(c.src), c, 0, sr)
+      }
+      applyEffects(buf, effects.filter((x) => x.type !== 'espectral'), r, 0, sr)
+      applyGain(buf, tr.volume, tr.envelope, 0, sr)
+      const out = buf[0]
+      for (let i = 0; i < N; i++) out[i] = 0.5 * (out[i] + buf[1][i])
+      return out
+    }
+    const voz = await mono(src, src.effects)
+    const faixa = await mono(t, t.effects.slice(0, fx))
+    const m = calcularMascara(voz, faixa, sr, snr, max)
+    await fs.mkdir(path.dirname(arq), { recursive: true })
+    const j = mascaraParaJson(m)
+    await fs.writeFile(arq, JSON.stringify(j))
+    return mascaraDoJson(j)   // a mesma tabela (em quartos de dB) que o preview recebe
+  })()
+  mascarasEmCurso.set(chave, p)
+  try {
+    return await p
+  } finally {
+    mascarasEmCurso.delete(chave)
   }
 }
 
@@ -283,33 +407,4 @@ function wavFloat([l, r]: Stereo, sr: number): Buffer {
     b.writeFloatLE(r[i], 48 + 8 * i)
   }
   return b
-}
-
-/**
- * The picture of the timeline over a black frame, with the mix as its sound. Video
- * tracks higher in the list sit on top; each clip is scaled to fit the frame.
- */
-async function composeVideo(r: ResolvedProject, ws: Workspace, media: Record<string, string>, audio: string, out: string, from: number, dur: number) {
-  const { width: W, height: H, fps } = r.video
-  const layers = r.tracks.filter((t) => t.type === 'video' && !t.muted).reverse()
-  const clips = layers.flatMap((t) => t.clips.filter((c) => !c.muted && c.end > from && c.start < from + dur))
-  const args = ['-v', 'error', '-y', '-f', 'lavfi', '-i', `color=c=black:s=${W}x${H}:r=${fps}:d=${dur.toFixed(3)}`]
-  const filters: string[] = ['[0:v]format=yuv420p[b0]']
-  clips.forEach((c, k) => {
-    const skip = Math.max(0, from - c.start)
-    args.push('-ss', (c.in + skip).toFixed(3), '-t', (c.duration - skip).toFixed(3), '-i', ws.resolveMedia(c.src, media))
-    const at = Math.max(0, c.start - from)
-    filters.push(
-      `[${k + 1}:v]setpts=PTS-STARTPTS+${at.toFixed(3)}/TB,scale=${W}:${H}:force_original_aspect_ratio=decrease,` +
-        `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,fps=${fps},format=yuv420p[v${k}]`,
-      `[b${k}][v${k}]overlay=eof_action=pass:enable='between(t,${at.toFixed(3)},${(at + c.duration - skip).toFixed(3)})'[b${k + 1}]`,
-    )
-  })
-  args.push('-i', audio)
-  const tmp = out.replace(/\.mp4$/i, '') + '.tmp.mp4'
-  args.push('-filter_complex', filters.join(';'), '-map', `[b${clips.length}]`, '-map', `${clips.length + 1}:a`,
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
-    '-t', dur.toFixed(3), '-movflags', '+faststart', tmp)
-  await run('ffmpeg', args)
-  await fs.rename(tmp, out)
 }

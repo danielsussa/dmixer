@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { formatTime, isSamplerTrack, resolveProject, round, type Project, type ResolvedClip } from '@dmixer/core'
-import { patch } from '../api'
+import { CORES_FUNCAO, formatTime, isSamplerTrack, resolveProject, round, type Project, type ResolvedClip } from '@dmixer/core'
+import { acervoProntas, acervoTrechoUrl, loadAcervoSongs, patch, type AcervoPiece, type AcervoSong } from '../api'
 import { engine, type Preview } from '../audio'
 import { useEditor } from '../store'
 import { cx, Icon, IconButton } from './ui'
@@ -169,7 +169,7 @@ export function LibraryPanel() {
   const [inst, setInst] = useState('')
   const [voz, setVoz] = useState(false)
   const [playing, setPlaying] = useState<string | null>(null)
-  const [mode, setMode] = useState<'pecas' | 'base' | 'complemento'>(() => (localStorage.getItem('dmixer.libmode') as 'base') ?? 'pecas')
+  const [mode, setMode] = useState<'pecas' | 'base' | 'complemento' | 'musicas'>(() => (localStorage.getItem('dmixer.libmode') as 'base') ?? 'pecas')
   const [conector, setConector] = useState(() => localStorage.getItem('dmixer.conector') === '1')
   const project = useEditor((s) => s.project)
   const resolved = useEditor((s) => s.resolved)
@@ -213,7 +213,7 @@ export function LibraryPanel() {
     setPlaying(it.id)
   }
 
-  if (!libs.length) {
+  if (!libs.length && mode !== 'musicas') {
     return (
       <div className="p-4 text-ink-400 leading-relaxed text-[12.5px]">
         Nenhuma biblioteca. Uma biblioteca é uma pasta com um <code>index.json</code> de peças; declare-a em
@@ -225,14 +225,18 @@ export function LibraryPanel() {
     <div className="flex-1 min-h-0 flex flex-col">
       <div className="p-3 space-y-2 border-b border-white/[0.05]">
         <div className="flex gap-1 p-0.5 rounded-lg bg-ink-950 w-fit">
-          {(['pecas', 'base', 'complemento'] as const).map((m) => (
+          {(['pecas', 'base', 'complemento', 'musicas'] as const).map((m) => (
             <button key={m} type="button" onClick={() => pickMode(m)}
               className={cx('h-6 px-2.5 rounded-md text-[11.5px]', mode === m ? 'bg-white/[0.10] text-ink-100' : 'text-ink-400 hover:text-ink-100')}>
-              {m === 'pecas' ? 'Peças' : m === 'base' ? 'Bases' : 'Complementos'}
+              {m === 'pecas' ? 'Peças' : m === 'base' ? 'Bases' : m === 'complemento' ? 'Complementos' : 'Músicas'}
             </button>
           ))}
         </div>
-        {mode !== 'complemento' && (
+        {mode === 'musicas' && (
+          <div className="text-[11px] text-ink-500 leading-snug">Músicas do acervo com análise profunda, em trechos. Arraste um trecho para uma trilha de áudio
+            (ou para o vazio: cria a trilha “Música (acervo)”); solto perto do fim de outro clipe da trilha, ele cola ali.</div>
+        )}
+        {mode !== 'complemento' && mode !== 'musicas' && (
           <div className="flex items-center gap-2">
             <button type="button" onClick={() => { const v = !conector; setConector(v); localStorage.setItem('dmixer.conector', v ? '1' : '0') }}
               title="mostra só as peças que encaixam depois da peça selecionada (ou da última da sequência)"
@@ -242,7 +246,7 @@ export function LibraryPanel() {
             {conector && <span className="text-[11px] text-ink-400 truncate">{ancora ? <>depois de <b className="text-ink-200">{ancora.clip.label ?? ancora.item.id}</b></> : 'coloque a primeira peça'}</span>}
           </div>
         )}
-        {mode === 'complemento' ? null : (<>
+        {mode === 'complemento' || mode === 'musicas' ? null : (<>
         <div className="flex flex-wrap gap-1">
           <Chip on={!cat} onClick={() => setCat(null)}>Todas</Chip>
           {Object.keys(CATEGORY).filter((k) => all.some((x) => x.it.category === k)).map((k) => (
@@ -292,7 +296,8 @@ export function LibraryPanel() {
         )}
       </div>
       {mode === 'complemento' && <Complements libs={libs} play={play} playing={playing} />}
-      <div className={cx('flex-1 min-h-0 overflow-y-auto p-2 space-y-2', mode === 'complemento' && 'hidden')}>
+      {mode === 'musicas' && <AcervoMusicas />}
+      <div className={cx('flex-1 min-h-0 overflow-y-auto p-2 space-y-2', (mode === 'complemento' || mode === 'musicas') && 'hidden')}>
         {groups.map(([key, items]) => {
           const first = items[0].it
           const cc = categoryOf(first.category)
@@ -359,9 +364,10 @@ function Chip({ on, color, onClick, children }: { on: boolean; color?: string; o
  * `media:` if needed, adds the asset once, and the clip on `trackId` — or on a new track
  * for the piece's category, sent to the music bus when the mix has one.
  */
-export async function dropPiece(project: Project, data: string, t: number, trackId: string | null, grid: 'bar' | 'beat' | 'off') {
+export async function dropPiece(project: Project, data: string, t: number, trackId: string | null, grid: 'bar' | 'beat' | 'off', audioTrack?: string | null) {
   const parsed = JSON.parse(data)
   if (parsed.kind === 'complement') return dropComplement(project, parsed, t, trackId)
+  if (parsed.kind === 'acervo') return dropTrecho(project, parsed, t, audioTrack ?? null)
   const snap = grid !== 'off'
   const { lib, item } = JSON.parse(data) as { lib: { alias: string; root: string; declared: boolean }; item: LibraryItem }
   const bpm = project.project.bpm ?? 72
@@ -388,7 +394,7 @@ export async function dropPiece(project: Project, data: string, t: number, track
   const label = `${categoryOf(item.category).label} · ${item.chord ?? ''} · i${item.intensity ?? ''}`
   // regra: peças só moram em trilha de samplers — a pedida, senão a da última peça, senão "Samplers"
   const items = libraryItemsById()
-  const holdsComplements = (x: Project['tracks'][number]) => (x.clips ?? []).some((c) => items.get(c.asset)?.role === 'complemento')
+  const holdsComplements = (x: Project['tracks'][number]) => (x.clips ?? []).some((c) => items.get(c.asset ?? '')?.role === 'complemento')
   const lastSampler = resolveProject(project).tracks.filter((x) => x.samplers && !holdsComplements(project.tracks.find((y) => y.id === x.id)!))
     .flatMap((x) => x.clips.map((c) => ({ x, end: c.bodyEnd }))).sort((a, b) => b.end - a.end)[0]?.x.id
   let track = [trackId, lastSampler, 'samplers'].map((id) => project.tracks.find((x) => x.id === id && isSamplerTrack(x) && !holdsComplements(x))).find(Boolean)
@@ -490,7 +496,7 @@ export function chordsUnder(project: Project, start: number, bars: number): stri
   const r = resolveProject(project)
   const items = libraryItemsById()
   const bar = (60 / (project.project.bpm ?? 72)) * (project.project.meter ?? 4)
-  const bases = r.tracks.flatMap((t) => t.clips.map((c) => ({ c, it: items.get(c.asset) }))).filter((x) => x.it?.role === 'base')
+  const bases = r.tracks.flatMap((t) => t.clips.map((c) => ({ c, it: items.get(c.asset ?? '') }))).filter((x) => x.it?.role === 'base')
   const out: string[] = []
   for (let b = 0; b < bars; b++) {
     const mid = start + (b + 0.5) * bar
@@ -509,7 +515,7 @@ function complementStart(project: Project, t: number): number {
   const r = resolveProject(project)
   const items = libraryItemsById()
   const bar = (60 / (project.project.bpm ?? 72)) * (project.project.meter ?? 4)
-  const base = r.tracks.flatMap((x) => x.clips).find((c) => items.get(c.asset)?.role === 'base' && c.start <= t && t < c.end)
+  const base = r.tracks.flatMap((x) => x.clips).find((c) => items.get(c.asset ?? '')?.role === 'base' && c.start <= t && t < c.end)
   if (base) return round(base.start + Math.floor((t - base.start) / bar) * bar)
   const off = project.project.grid_offset ?? 0
   return round(Math.max(0, off + Math.floor((t - off) / bar) * bar))
@@ -536,7 +542,7 @@ function complementBars(project: Project, start: number, min: number): number {
   const r = resolveProject(project)
   const items = libraryItemsById()
   const bar = (60 / (project.project.bpm ?? 72)) * (project.project.meter ?? 4)
-  const base = r.tracks.flatMap((x) => x.clips).find((c) => items.get(c.asset)?.role === 'base' && c.start <= start + 0.01 && start < c.bodyEnd - 0.01)
+  const base = r.tracks.flatMap((x) => x.clips).find((c) => items.get(c.asset ?? '')?.role === 'base' && c.start <= start + 0.01 && start < c.bodyEnd - 0.01)
   return Math.max(min, base ? Math.round((base.bodyEnd - start) / bar) : 2)
 }
 
@@ -556,7 +562,7 @@ export async function dropComplement(project: Project, data: { lib: { alias: str
   while (taken.has(`${item.id}-${n}`)) n++
   const clip = { id: `${item.id}-${n}`, asset: item.id, start, label: `${data.recipe} · ${chords.join(' ')} · i${data.intensity}` }
   const items = libraryItemsById()
-  const target = trackId ? fresh.tracks.find((x) => x.id === trackId && isSamplerTrack(x) && !(x.clips ?? []).some((c) => items.get(c.asset)?.role !== 'complemento')) : undefined
+  const target = trackId ? fresh.tracks.find((x) => x.id === trackId && isSamplerTrack(x) && !(x.clips ?? []).some((c) => items.get(c.asset ?? '')?.role !== 'complemento')) : undefined
   if (target) {
     ops.push({ op: 'add', path: target.clips ? `/tracks/[id=${target.id}]/clips/-` : `/tracks/[id=${target.id}]/clips`, value: target.clips ? clip : [clip] })
   } else {
@@ -577,7 +583,7 @@ export async function refitComplement(project: Project, trackId: string, clipId:
   const items = libraryItemsById()
   const track = project.tracks.find((t) => t.id === trackId)
   const clip = track?.clips?.find((c) => c.id === clipId)
-  const it = clip ? items.get(clip.asset) : undefined
+  const it = clip ? items.get(clip.asset ?? '') : undefined
   if (!clip || !it?.recipe || it.role !== 'complemento') return
   const r = resolveProject(project)
   const rc = r.tracks.find((t) => t.id === trackId)!.clips.find((c) => c.id === clipId)!
@@ -605,7 +611,7 @@ export async function setBaseChord(project: Project, trackId: string, clipId: st
   await loadLibraries()
   const items = libraryItemsById()
   const clip = project.tracks.find((t) => t.id === trackId)?.clips?.find((c) => c.id === clipId)
-  const it = clip ? items.get(clip.asset) : undefined
+  const it = clip ? items.get(clip.asset ?? '') : undefined
   if (!clip || !it || it.role !== 'base') return
   const lib = (cache?.libs ?? []).find((l) => l.items.some((x) => x.id === it.id))!
   const alt = lib.items.find((x) => x.role === 'base' && x.recipe === it.recipe && x.intensity === it.intensity && x.bars === it.bars && x.chord === chord)
@@ -622,7 +628,7 @@ export async function setBaseChord(project: Project, trackId: string, clipId: st
   if (!base) return
   for (const t of r.tracks) {
     for (const c of t.clips) {
-      const ci = items.get(c.asset)
+      const ci = items.get(c.asset ?? '')
       if (ci?.role === 'complemento' && ci.harmonic !== false && c.start < base.end && c.end > base.start) {
         await refitComplement(useEditor.getState().project ?? fresh, t.id, c.id)
       }
@@ -672,7 +678,7 @@ export async function alinharComTag(alvo: number, rotulo: string, anchorId?: { t
   const bpm = project.project.bpm ?? 72
   const T = 60 / bpm
   const bar = T * (project.project.meter ?? 4)
-  const pieces = r.tracks.filter((t) => t.samplers).flatMap((t) => t.clips.map((c) => ({ t, c, x: items.get(c.asset) })))
+  const pieces = r.tracks.filter((t) => t.samplers).flatMap((t) => t.clips.map((c) => ({ t, c, x: items.get(c.asset ?? '') })))
     .filter((p) => p.x && p.x.it.role !== 'complemento')
   if (!pieces.length) return 'ainda não há peças na trilha de samplers'
   const anchor = (anchorId && pieces.find((p) => p.t.id === anchorId.trackId && p.c.id === anchorId.clipId))
@@ -778,7 +784,7 @@ export function restaurarSoltos(trackId: string, clips: { id: string; start: num
 /** Where the transitions (coberturas) hit, over the whole mix: the joins there are covered. */
 export function coberturas(r: { tracks: { id: string; clips: ResolvedClip[] }[] }, items: Map<string, LibraryItem>) {
   return r.tracks.flatMap((t) => t.clips.flatMap((c) => {
-    const it = items.get(c.asset)
+    const it = items.get(c.asset ?? '')
     return it?.role === 'cobertura' && it.hit !== undefined ? [{ at: round(c.start + it.hit - c.in), trackId: t.id, clip: c }] : []
   }))
 }
@@ -790,7 +796,7 @@ export function emendaDe(project: Project, trackId: string, clipId: string) {
   const t = r.tracks.find((x) => x.id === trackId)
   const cur = t?.clips.find((c) => c.id === clipId)
   if (!t || !cur) return null
-  const prev = t.clips.find((c) => c.id !== cur.id && Math.abs(c.bodyEnd - cur.start) < 0.06 && items.get(c.asset)?.role !== 'cobertura')
+  const prev = t.clips.find((c) => c.id !== cur.id && Math.abs(c.bodyEnd - cur.start) < 0.06 && items.get(c.asset ?? '')?.role !== 'cobertura')
   const ea = prev ? edgeOf(items.get(prev.asset), prev.raw) : null
   const eb = edgeOf(items.get(cur.asset))
   if (!prev || !ea || !eb) return null
@@ -853,4 +859,190 @@ export async function descobrirEmenda(trackId: string, clipId: string) {
   const e = emendaDe(project, trackId, clipId)
   if (!e?.cobertura) return
   await patch([{ op: 'remove' as 'replace', path: `/tracks/[id=${e.cobertura.trackId}]/clips/[id=${e.cobertura.clip.id}]`, value: undefined }], 'Tirar transição')
+}
+
+/**
+ * Aba Músicas: as músicas do acervo com análise profunda, cada uma com as peças (P<n> função · início), a borda na cor
+ * da função. Ouvir toca só o trecho; arrastar leva o trecho para a timeline (dropTrecho).
+ */
+type TrechoDrag = { kind: 'acervo'; root: string; song: { id: string; titulo: string; src: string; bpm?: number; dur?: number }; piece: AcervoPiece & { n: number } }
+function AcervoMusicas() {
+  const [songs, setSongs] = useState<AcervoSong[] | null>(null)
+  const [erro, setErro] = useState('')
+  const [q, setQ] = useState('')
+  const [aberta, setAberta] = useState<string | null>(null)
+  const [tocando, setTocando] = useState<string | null>(null)
+  const audio = useRef<Preview | null>(null)
+  useEffect(() => { loadAcervoSongs().then(setSongs, (e: Error) => setErro(e.message)) }, [])
+  useEffect(() => () => audio.current?.pause(), [])
+  const ouvir = (s: AcervoSong, p: AcervoPiece, chave: string) => {
+    audio.current?.pause()
+    if (tocando === chave) { setTocando(null); return }
+    const a = engine.preview(acervoTrechoUrl(s.src, p.start, p.end))
+    a.onended = () => setTocando((x) => (x === chave ? null : x))
+    audio.current = a
+    setTocando(chave)
+  }
+  if (erro) return <div className="p-4 text-red-400 text-[12px]">{erro}</div>
+  if (!songs) return <div className="p-4 text-ink-400 text-[12px]">carregando o acervo…</div>
+  const vis = songs.filter((s) => !q || `${s.titulo} ${s.artista ?? ''} ${s.id}`.toLowerCase().includes(q.toLowerCase()))
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-2">
+      <input className="field w-full" placeholder="buscar música…" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.stopPropagation()} />
+      {!vis.length && <div className="p-2 text-ink-400 text-[12px] leading-snug">Nenhuma música com análise profunda ainda. No acervo: <code>acervo.py analisar &lt;id&gt; --profunda</code>.</div>}
+      {vis.map((s) => {
+        const open = aberta === s.id || vis.length === 1
+        const funcoes = [...new Set(s.pieces.map((p) => p.role).filter(Boolean))]
+        return (
+          <div key={s.id} className="rounded-lg bg-ink-850 border border-white/[0.05] p-2">
+            <button type="button" className="w-full flex items-center gap-2 text-left" onClick={() => setAberta(open ? null : s.id)}>
+              <Icon.Music size={12} />
+              <span className="text-[12.5px] text-ink-100 truncate flex-1">{s.titulo}</span>
+              <span className="text-[10.5px] text-ink-500 shrink-0">{s.bpm ? `${Math.round(s.bpm)} BPM` : ''}{s.key ? ` · ${s.key}` : ''} · {s.pieces.length} trechos</span>
+            </button>
+            {open && (<>
+              <div className="flex flex-wrap gap-1 mt-2">
+                {s.pieces.map((p, i) => {
+                  const cor = CORES_FUNCAO[p.role as keyof typeof CORES_FUNCAO] ?? '#8a8f98'
+                  const chave = `${s.id}#${i}`
+                  const drag: TrechoDrag = { kind: 'acervo', root: s.root, song: { id: s.id, titulo: s.titulo, src: s.src, bpm: s.bpm, dur: s.duracao }, piece: { ...p, n: i + 1 } }
+                  return (
+                    <div key={i} draggable
+                      onDragStart={(e) => { e.dataTransfer.setData(DRAG_TYPE, JSON.stringify(drag)); e.dataTransfer.effectAllowed = 'copy' }}
+                      title={`P${i + 1}${p.role ? ` · ${p.role}` : ''}${p.mood ? ` · ${p.mood}` : ''}\n${formatTime(p.start, 1)} → ${formatTime(p.end, 1)} · energia ${Math.round(p.energy * 100)}\narraste para a timeline`}
+                      className="flex items-center gap-1 h-7 pl-0.5 pr-2 rounded-md bg-white/[0.04] hover:bg-white/[0.08] cursor-grab active:cursor-grabbing"
+                      style={{ borderLeft: `3px solid ${cor}` }}>
+                      <IconButton className="h-6 min-w-6 !px-0" title="ouvir o trecho" onClick={() => ouvir(s, p, chave)}>
+                        {tocando === chave ? <Icon.Pause size={11} /> : <Icon.Play size={11} />}
+                      </IconButton>
+                      <b className="text-[11px] text-ink-100">P{i + 1}</b>
+                      <span className="text-[10.5px] text-ink-400">{p.role || p.mood} · {formatTime(p.start, 0)}</span>
+                    </div>
+                  )
+                })}
+              </div>
+              {funcoes.length > 0 && (
+                <div className="flex flex-wrap gap-x-2.5 gap-y-1 mt-1.5 text-[10.5px] text-ink-400">
+                  {Object.entries(CORES_FUNCAO).filter(([f]) => funcoes.includes(f)).map(([f, c]) => (
+                    <span key={f} className="inline-flex items-center gap-1"><i className="inline-block w-2 h-2 rounded-sm" style={{ background: c }} />{f}</span>
+                  ))}
+                </div>
+              )}
+            </>)}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * Juntas de uma trilha quebra-cabeça: para cada peça, a que começa onde o corpo dela acaba (a próxima). Vizinhas no
+ * arquivo (a próxima continua de onde esta parou) emendam sem fade. Pulo = crossfade simétrico de X s centrado na junta:
+ * esta segue X/2 além do corpo (o material de depois, no arquivo) e a próxima começa X/2 antes (`head`, o material de
+ * antes), as duas em potência constante. X que a junta já tinha fica; sem X ainda, 1 tempo da música. A última peça
+ * ganha só a cauda, para não terminar seca.
+ */
+export type PecaJunta = { id: string; asset: string; start: number; inP: number; body: number; out: number; fadeIn?: number; fadeOut?: number; head?: number; durArquivo: number; bpm?: number }
+export function juntasOps(project: Project, trackId: string, pecas: PecaJunta[]): Op[] {
+  const ops: Op[] = []
+  const xs = [...pecas].sort((a, b) => a.start - b.start)
+  const base = `/tracks/[id=${trackId}]/clips/[id=`
+  const poe = (id: string, k: string, v: number, antes?: number) => {
+    if (antes !== undefined && Math.abs(antes - v) < 0.0005) return
+    if (k === 'head' && v < 0.0005) {
+      if (antes !== undefined) ops.push({ op: 'remove', path: `${base}${id}]/head` })
+      return
+    }
+    ops.push({ op: antes === undefined ? 'add' : 'replace', path: `${base}${id}]/${k}`, value: round(v) } as Op)
+  }
+  const tempo = (a: PecaJunta) => Math.min(0.6, Math.max(0.25, 60 / (a.bpm || 120)))
+  xs.forEach((a, i) => {
+    const fimCorpo = a.start + (a.body - a.inP)
+    const prox = xs.find((b, j) => j !== i && Math.abs(b.start - fimCorpo) < 0.02)
+    const src = (id: string) => project.assets[id]?.src
+    const vizinho = !!prox && src(prox.asset) === src(a.asset) && Math.abs(prox.inP - a.body) < 0.02
+    const sobra = Math.max(0, a.durArquivo - a.body)
+    if (vizinho) {
+      poe(a.id, 'out', a.body, a.out)
+      poe(a.id, 'fade_out', 0.005, a.fadeOut)
+      poe(prox!.id, 'fade_in', 0.005, prox!.fadeIn)
+      poe(prox!.id, 'head', 0, prox!.head)
+      return
+    }
+    if (!prox) {
+      const ja = a.out - a.body
+      const cauda = Math.min(sobra, ja > 0.02 ? ja : tempo(a))
+      poe(a.id, 'out', a.body + cauda, a.out)
+      poe(a.id, 'fade_out', Math.max(0.01, cauda), a.fadeOut)
+      return
+    }
+    const ja = (a.out - a.body) + (prox.head ?? 0)
+    const X = ja > 0.02 ? ja : tempo(a)
+    const cauda = Math.min(X / 2, sobra)
+    const cabeca = Math.min(X / 2, prox.inP)
+    const L = Math.max(0.01, cauda + cabeca)
+    poe(a.id, 'out', a.body + cauda, a.out)
+    poe(a.id, 'fade_out', L, a.fadeOut)
+    poe(prox.id, 'head', cabeca, prox.head)
+    poe(prox.id, 'fade_in', L, prox.fadeIn)
+  })
+  return ops
+}
+
+/** as peças de uma trilha quebra-cabeça no formato de juntasOps (o body ausente vira o out: peça sem cauda) */
+export function pecasDaTrilha(project: Project, trackId: string, sem?: string): PecaJunta[] {
+  const r = resolveProject(project)
+  const t = r.tracks.find((x) => x.id === trackId)
+  return (t?.clips ?? []).filter((c) => c.id !== sem).map((c) => ({
+    id: c.id, asset: c.asset, start: c.start, inP: c.in, body: c.raw.body ?? c.out, out: c.out, fadeIn: c.raw.fade_in, fadeOut: c.raw.fade_out,
+    head: c.raw.head, durArquivo: project.assets[c.asset]?.meta?.duration ?? c.out, bpm: acervoBpm(c.src),
+  }))
+}
+function acervoBpm(src: string): number | undefined {
+  return acervoProntas.get(src)?.bpm
+}
+
+/**
+ * Um trecho de música do acervo solto na timeline: vira uma peça (clipe do arquivo inteiro, in/body = o trecho) numa
+ * trilha quebra-cabeça — a onde caiu, senão a última quebra-cabeça, senão uma nova "Música (acervo)". Encaixa colado no
+ * fim da peça mais perto (até 1,5 s), nunca em cima de outra (vai ao encaixe livre mais próximo); as juntas se refazem.
+ */
+async function dropTrecho(project: Project, d: TrechoDrag, t: number, rowTrack: string | null) {
+  const ops: Op[] = []
+  if (!project.media?.acervo) {
+    ops.push(project.media ? { op: 'add', path: '/media/acervo', value: d.root } : { op: 'add', path: '/media', value: { acervo: d.root } })
+  }
+  const aid = d.song.id.replace(/^musica\//, '').replace(/[^a-z0-9-]+/gi, '-').slice(0, 48)
+  if (!project.assets[aid]) ops.push({ op: 'add', path: `/assets/${aid}`, value: { src: `@acervo/${d.song.src}`, label: d.song.titulo } })
+  const quebras = project.tracks.filter((x) => x.quebra)
+  const track = quebras.find((x) => x.id === rowTrack) ?? quebras[quebras.length - 1]
+  const p = d.piece
+  const len = p.end - p.start
+  const bodies = track ? pecasDaTrilha(project, track.id).map((x) => ({ start: x.start, end: x.start + x.body - x.inP })) : []
+  const ima = bodies.map((b) => b.end).filter((e) => Math.abs(e - t) < 1.5).sort((a, b) => Math.abs(a - t) - Math.abs(b - t))[0]
+  const start = round(freeStart(bodies, ima ?? Math.max(0, t), len))
+  const taken = new Set(project.tracks.flatMap((x) => (x.clips ?? []).map((c) => c.id)))
+  let n = 1
+  while (taken.has(`${aid}-p${p.n}-${n}`)) n++
+  const clip = {
+    id: `${aid}-p${p.n}-${n}`, asset: aid, start, in: round(p.start), body: round(p.end), out: round(p.end), fade_in: 0.01, fade_out: 0.01,
+    label: `${d.song.titulo} · P${p.n}${p.role ? ` ${p.role}` : ''}${p.mood ? ` · ${p.mood}` : ''}`,
+  }
+  if (!track) {
+    ops.push({ op: 'add', path: '/tracks/-', value: { id: `musica-acervo-${Date.now().toString(36)}`, quebra: true, name: 'Música (acervo)', color: '#c9a227', clips: [clip] } })
+    await patch(ops as never, `Trecho P${p.n} de ${d.song.titulo}`)
+    return
+  }
+  ops.push({ op: 'add', path: track.clips ? `/tracks/[id=${track.id}]/clips/-` : `/tracks/[id=${track.id}]/clips`, value: track.clips ? clip : [clip] })
+  const durArq = project.assets[aid]?.meta?.duration ?? d.song.dur ?? p.end
+  const pecas = [...pecasDaTrilha(project, track.id), { id: clip.id, asset: aid, start, inP: clip.in, body: clip.body, out: clip.out, fadeIn: clip.fade_in, fadeOut: clip.fade_out, durArquivo: durArq, bpm: d.song.bpm }]
+  // as juntas do clipe novo nascem já com os valores (os ops dele editariam um clipe que só existe depois do add)
+  const jo = juntasOps({ ...project, assets: { ...project.assets, [aid]: { src: `@acervo/${d.song.src}` } } } as Project, track.id, pecas)
+  for (const o of jo) {
+    const m = o.path.match(/\[id=([^\]]+)\]\/([a-z_]+)$/)
+    if (m && m[1] === clip.id) (clip as Record<string, unknown>)[m[2]] = o.value
+    else ops.push(o)
+  }
+  await patch(ops as never, `Trecho P${p.n} de ${d.song.titulo}`)
 }

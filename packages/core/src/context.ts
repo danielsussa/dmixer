@@ -16,11 +16,16 @@ export function describeProject(project: Project): string {
   }
   if (r.regions.length) {
     lines.push('', 'TAGS (referenceable as "@id" and "@id.end")')
+    if (r.regions.some((g) => g.lane === 'texto')) lines.push('  (lane "texto": unrecorded narration, one tag per block, in `text`; time is estimated by reading speed)')
     for (const l of r.lanes) {
       const items = r.regions.filter((g) => g.lane === l.id).sort((a, b) => a.start - b.start)
       if (!items.length) continue
       lines.push(`  ${l.name}:`)
-      for (const g of items) lines.push(`    @${g.id} ${formatTime(g.start, 2)} → ${formatTime(g.end, 2)}  ${g.label}`)
+      for (const g of items) {
+        lines.push(`    @${g.id} ${formatTime(g.start, 2)} → ${formatTime(g.end, 2)}  ${g.raw.text ? '' : g.label}`.trimEnd())
+        // a fala ainda não gravada, inteira: é o roteiro que se revisa
+        if (g.raw.text) lines.push(...g.raw.text.trim().split('\n').map((x) => `      | ${x}`))
+      }
     }
   }
   for (const t of r.tracks) {

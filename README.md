@@ -111,20 +111,48 @@ tracks:
 
 ## Vídeo
 
-Uma trilha `type: video` guarda a imagem. Os clipes dela usam os mesmos campos dos de áudio (`start`, `in`, `out`, ancoragem em marcadores e tags) e aparecem na timeline com miniaturas.
-- **Visor:** à direita, mostra o quadro do playhead e acompanha a mixagem ao tocar, pausar ou arrastar o playhead.
-- **Render mp4:** monta a imagem com a mixagem como som. As trilhas de vídeo mais acima na lista ficam por cima, e cada clipe é ajustado ao quadro de `project.video`.
-- **Som do vídeo:** a trilha de vídeo não faz som. Para ouvir o som original, ponha o mesmo arquivo numa trilha de áudio.
+O dmixer edita a imagem junto com o som, num arquivo só. Uma trilha `type: video` guarda imagem. As trilhas de vídeo mais acima na lista ficam por cima. A composição foi trazida do vidmeo (`core/src/visual.ts`) e é a mesma no visor e no render mp4 (`server/src/video.ts`).
+
+**O que um clipe de vídeo pode ser:**
+- **um arquivo:** vídeo (`in`/`out`, como no áudio), foto (`.jpg`, `.png`…, com `duration`) ou página `.html` (um título animado, com `duration` e `params`, que vão na query string);
+- **`type: color`:** um cartão chapado da cor `fill` (preto por padrão), sem arquivo;
+- **`type: adjustment`:** uma camada de ajuste, que não desenha nada e aplica os `effects` dela a tudo o que está abaixo, enquanto dura (a grade do filme todo, o grão).
+
+**Campos de imagem:**
+- `transform` (`x`, `y` em pixels a partir do centro; `scale` sobre o encaixe no quadro; `rotation` em graus), cada um um número ou `{keyframes: [{at, value, easing?}]}`, com `at` no tempo do clipe. Zoom de 2,0 → 1,85 ao longo do clipe é o Ken Burns;
+- `crop` (frações), `opacity`, `transition` e `transition_out` (`{type: fade, duration}`, rampas de opacidade nas pontas);
+- `effects`: `color` (exposure, contrast, saturation, gamma, temperature, tint, red/green/blue, com uma fórmula só para o ffmpeg e o navegador), `grain`, `blur`, `brightness`, `contrast`, `saturate`, `grayscale`.
+
+**Páginas html:** o contrato de tempo é o do vidmeo, com os mesmos nomes, e as mesmas páginas servem nos dois. As animações CSS ficam pausadas e são postas no tempo local do clipe; `--vidmeo-duration` e `--vidmeo-time` ficam no `<html>`; `window.vidmeoSeek(t, dur)` é chamado a cada quadro, se existir. No render, o Chrome headless (playwright-core; `DMIXER_CHROME` escolhe o executável) captura os quadros, com cache em `cache/html/`.
+
+**Na tela:**
+- **Visor:** à direita, compõe o quadro do playhead e acompanha a mixagem. ⤢ amplia. O grão só aparece com a mix parada.
+- **Inspetor:** num clipe de vídeo, mostra duração, zoom e x/y do começo ao fim, entrada e saída, a cor e, numa página, os params (o texto do título).
+- **Adicionar:** arraste fotos e vídeos do computador para uma trilha de vídeo (vão para `imagem/`; uma foto entra com 4 s), ou use o menu da trilha: "Importar foto ou vídeo…" e "Cartão preto no playhead".
+- **Render mp4:** `dmixer render mix.yaml --out f.mp4 [--from s] [--to s]`, ou pela tela.
+
+A trilha de vídeo não faz som. Para ouvir o som original, ponha o mesmo arquivo numa trilha de áudio.
 
 ```yaml
 project:
-  video: { width: 1920, height: 1080, fps: 30 }
+  video: { width: 1920, height: 1080, fps: 24 }
+media:
+  fotos: arquivo/fotos-2k
 assets:
-  edicao: { src: "@video/renders/edicao.mp4" }
+  terra: { src: "@fotos/as13-60-8588.jpg" }
+  texto: { src: titulos/texto.html }
 tracks:
+  - id: titulos
+    type: video
+    clips: [{ id: t1, asset: texto, start: 17.3, duration: 2.6, params: { t: "Apollo 13 · abril de 1970" } }]
+  - id: grade
+    type: video
+    clips: [{ id: grade, type: adjustment, start: 0, duration: 300, effects: [{ type: color, contrast: 1.12 }, { type: grain, amount: 12 }] }]
   - id: imagem
     type: video
-    clips: [{ id: corte-1, asset: edicao, start: 0 }]
+    clips:
+      - { id: preto, type: color, start: 0, duration: 1.2 }
+      - { id: p1, asset: terra, start: 1.2, duration: 7.5, transform: { scale: { keyframes: [{ at: 0, value: 2.0 }, { at: 7.5, value: 1.85 }] } } }
 ```
 
 ## Bibliotecas de peças
@@ -144,6 +172,52 @@ Para encurtar uma música sem que se perceba: selecione o clipe, e no Inspetor c
 - Funciona melhor em música com andamento fixo. O resultado fica em `cache/analysis/`, então a segunda vez é instantânea.
 
 Instalação (uma vez): `npm run setup:analyzer` cria `~/.dmixer/venv` com numpy e Essentia. Outro Python pode ser indicado em `~/.dmixer/config.json`: `{"analyzer": {"python": "/caminho/bin/python"}}`.
+
+## Roteiro
+
+O botão **Roteiro** na barra de cima abre `/c/<id>/roteiro`: o texto que a narração diz, na ordem da mixagem,
+dividido pelos capítulos e marcado pelos humores. Clicar numa palavra (ou no horário de um parágrafo) toca dali; a
+palavra que está tocando fica acesa, e "seguir" rola até ela. O áudio é o mesmo da timeline.
+
+- **Faixas fixas.** O roteiro lê três faixas de tags pelo id: `capitulos` (uma tag por capítulo), `humor` e `texto`.
+  Mixagens novas já nascem com elas; numa antiga, a página oferece "Criar as faixas".
+- **Humores de sempre.** leve, energia, agressivo, relaxado, triste, feliz, tenso, dançante, festa e valência, cada um
+  com sua cor (`HUMORES` em `packages/core/src/roteiro.ts`). Uma tag na faixa Humor sem `color` pega a cor do nome; o
+  Inspector mostra a paleta para escolher. Outro nome também vale.
+- **Antes da gravação**, a fala mora na faixa `texto`: uma tag por bloco, com o texto em `text`, no tempo estimado pela
+  leitura (2,5 palavras/s; o Inspector tem "duração pela leitura"). Assim capítulos, humores e até a trilha já podem
+  ser montados sem a voz. O roteiro mostra esses blocos com `~` no horário e uma borda tracejada. Para revisar, o agente
+  lê o `dmixer context`, que traz o texto inteiro de cada bloco, e altera o `text` das tags.
+
+  ```yaml
+  - id: b1
+    start: 0
+    end: 8.6
+    lane: texto
+    text: E quando você tem as melhores cartas da mesa, e o jogo perfeito está ali?
+  ```
+- **Depois da gravação**, o texto vem do `palavras.json` ao lado de cada voz (`s0.voice.mp3` → `s0.palavras.json`, com
+  `palavras: [[início, fim, "palavra"], …]` e, opcional, `frases`). Só entra o que o clipe toca: um corte some do texto.
+  Onde há fala gravada, o bloco da faixa texto deixa de aparecer. Trilhas de fala sem transcrição aparecem no fim.
+
+## Remontar (quebra-cabeça)
+
+Para refazer uma música com outra duração ou outra forma: selecione um clipe dela, e no Inspetor, em **Remontar**, clique em **Cortar em peças**.
+
+1. **Peças.** O analisador (`analyze.py --pecas`) corta a música em frases de compassos inteiros, normalmente de 4. A divisão sai de uma busca pelas divisas onde a música mais muda.
+2. **Função de cada peça:** abertura, respiro, base, subida, virada (a batida sai no fim e pede um pico depois), pico ou final. Junto vêm a energia (0–1 dentro da música) e as camadas ativas. Peças quase iguais são marcadas como gêmeas.
+3. **Emenda entre peças.** Para cada par de peças, a emenda é medida com a mesma conta da matriz dos pontos de corte. Peças que já eram vizinhas no original têm nota 100%.
+4. **O molde:**
+   - **duração:** a do trecho, em segundos, ou até um marcador;
+   - **curva de energia:** como a original, direto ao pico, pico no meio, cresce até o fim, ou dois picos com um respiro;
+   - **pico em um marcador:** um trecho forte começa ali, como o drop num corte do vídeo;
+   - **começo e fim:** pode começar no meio da música e acabar antes do final, com fade.
+5. **Gerar opções.** A busca (`core/remontar.ts`) mostra 3 sequências diferentes. Cada uma vem com a fita das peças coloridas por função, a nota de cada emenda e o pior caso. "aplicar alinhando" desloca a remontagem para o pico cair exatamente no marcador; quando seria preciso começar antes, apara o começo da abertura.
+6. **Aplicar.** O trecho (o clipe e os pedaços da mesma música encostados nele) vira um clipe por peça, colorido e rotulado (`P3 · pico`). A nota de cada clipe diz de onde a peça veio e a nota da emenda. Cada emenda corta 12 ms antes do 1º tempo, com crossfade de 20 ms, para o golpe da peça nova entrar inteiro. O que vem depois na trilha anda junto, e Ctrl+Z desfaz tudo.
+
+**Análise profunda (opcional).** Quando o Essentia não acha uma batida firme (trilha orquestral, andamento lido dobrado), o botão **Análise profunda** usa o [All-In-One](https://github.com/mir-aidj/all-in-one) (`profunda.py`). Ele dá a grade, as seções e os stems (bateria, baixo, outros, voz), que melhoram as funções.
+- Precisa de um ambiente Python próprio, com torch (~1,5 GB), indicado em `~/.dmixer/config.json`: `{"analyzer": {"profunda": "/caminho/bin/python"}}`.
+- Na CPU leva 3–5× a duração da música na primeira vez. O servidor trabalha em segundo plano e guarda o resultado em `cache/analysis/`.
 
 ## Preview e render
 

@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { formatTime, type Effect, type EffectType } from '@dmixer/core'
-import { hasAnalysis, loadAnalysis, P, patch, type Analysis } from '../api'
+import { CORES_FUNCAO, duracaoDaLeitura, FAIXA_HUMOR, FAIXA_TEXTO, HUMORES, LEITURA, CURVAS, curvaOriginal, formatTime, remontar, type Effect, type EffectType, type Molde, type Remontagem } from '@dmixer/core'
+import { acervoProntas, hasAnalysis, loadAcervo, loadAnalysis, loadPieces, P, patch, type AcervoAnalysis, type Analysis, type PecasResposta } from '../api'
 import { engine, type Preview } from '../audio'
-import { encaixarEmendas, removeStretch, repeatStretch } from '../tools'
+import { cx } from './ui'
+import { aplicarRemontagem, encaixarEmendas, removeStretch, repeatStretch, separarPecas, trechoDaMusica } from '../tools'
 import { useEditor } from '../store'
+import { ImagemCampos } from './ImagemCampos'
 import { alinharComTag, baseChords, cobrirEmenda, descobrirEmenda, emendaDe, libraryItemsById, loadLibraries, refitComplement, setBaseChord } from './Library'
 
 /** Edits whatever is selected. Every field commits on Enter or blur, as one undo step. */
@@ -23,10 +25,10 @@ export function Inspector() {
       const set = (k: string, v: unknown) => patch([{ op: v === undefined ? 'remove' : (k in c ? 'replace' : 'add'), path: `${base}/${k}`, ...(v === undefined ? {} : { value: v }) } as never], `${k} of ${c.id}`)
       body = (
         <Section title={`Clipe · ${c.id}`}>
-          <Row label="asset"><span className="truncate text-[var(--muted)]" title={project.assets[c.asset]?.src}>{c.asset}</span></Row>
+          <Row label="asset"><span className="truncate text-[var(--muted)]" title={project.assets[c.asset ?? '']?.src}>{c.asset}</span></Row>
           <Row label="início"><Text value={String(c.start)} onCommit={(v) => set('start', timeOrNumber(v))} /></Row>
           <Row label=""><span className="num text-[var(--muted)]">{formatTime(rc.start, 2)} → {formatTime(rc.end, 2)} ({rc.duration.toFixed(2)} s)</span></Row>
-          {project.assets[c.asset]?.body !== undefined ? (
+          {t.type === 'video' ? <ImagemCampos c={c} rc={rc} set={set} /> : project.assets[c.asset ?? '']?.body !== undefined ? (
             <div className="rounded-lg bg-ink-850 border border-white/[0.05] p-2.5 text-[11.5px] text-ink-400 leading-snug space-y-1">
               <div><b className="text-ink-200">{c.label ?? c.id}</b></div>
               <div>Peça da biblioteca: tamanho e conteúdo fixos, como um bloco de lego. Dá para mover, mutar e apagar; o volume se ajusta na trilha ou no envelope.</div>
@@ -39,11 +41,13 @@ export function Inspector() {
           <Row label="fade in"><Num value={c.fade_in ?? 0.005} onCommit={(v) => set('fade_in', v)} /></Row>
           <Row label="fade out"><Num value={c.fade_out ?? 0.005} onCommit={(v) => set('fade_out', v)} /></Row>
           <Row label="rótulo"><Text value={c.label ?? ''} onCommit={(v) => set('label', v || undefined)} /></Row>
-          {t.type !== 'video' && t.type !== 'bus' && <CutPoints trackId={t.id} clipId={c.id} />}
+          {t.type !== 'bus' && <PecasDoAcervo src={rc.src} start={rc.start} from={rc.in} to={rc.out} onSeparar={() => void separarPecas(t.id, c.id)} />}
+          {t.type !== 'bus' && <CutPoints trackId={t.id} clipId={c.id} />}
+          {t.type !== 'bus' && project.assets[c.asset ?? '']?.body === undefined && <Remontar trackId={t.id} clipId={c.id} />}
           </>)}
           <Row label="nota"><Text value={c.note ?? ''} onCommit={(v) => set('note', v || undefined)} /></Row>
           <Row label="mudo"><input type="checkbox" checked={!!c.muted} onChange={(e) => set('muted', e.target.checked || undefined)} /></Row>
-          <ComplementRefit trackId={t.id} clipId={c.id} asset={c.asset} />
+          <ComplementRefit trackId={t.id} clipId={c.id} asset={c.asset ?? ''} />
           <div className="pt-2">
             <button className="btn" onClick={() => patch([{ op: 'remove', path: base }], `Delete ${c.id}`)}>Apagar clipe</button>
           </div>
@@ -98,6 +102,34 @@ export function Inspector() {
       body = (
         <Section title={`Tag · @${g.id}`}>
           <Row label="rótulo"><Text value={g.label ?? ''} onCommit={(v) => set('label', v || undefined)} /></Row>
+          {rg.lane === FAIXA_TEXTO && (
+            <Row label="fala">
+              <div className="flex flex-col gap-1 w-full">
+                <TextoLongo value={g.text ?? ''} onCommit={(v) => set('text', v.trim() ? v : undefined)} />
+                {!!g.text?.trim() && (
+                  <button type="button" className="btn !h-7 self-start" title={`${LEITURA} palavras/s, mais um respiro por frase`}
+                    onClick={() => set('end', Math.round((rg.start + duracaoDaLeitura(g.text!)) * 1000) / 1000)}>
+                    duração pela leitura: {duracaoDaLeitura(g.text)} s
+                  </button>
+                )}
+              </div>
+            </Row>
+          )}
+          {rg.lane === FAIXA_HUMOR && (
+            <Row label="humor">
+              <div className="flex flex-wrap gap-1">
+                {HUMORES.map((h) => (
+                  <button key={h.nome} type="button" title={`rótulo "${h.nome}", cor da paleta`}
+                    className={cx('h-[20px] px-1.5 rounded text-[11px] font-medium', rg.label === h.nome ? 'ring-2 ring-white/70' : 'opacity-80 hover:opacity-100')}
+                    style={{ background: h.cor, color: '#0b0b0c' }}
+                    onClick={() => patch([
+                      { op: 'label' in g ? 'replace' : 'add', path: `${base}/label`, value: h.nome },
+                      ...('color' in g ? [{ op: 'remove' as const, path: `${base}/color` }] : []),
+                    ], `Humor ${g.id}: ${h.nome}`)}>{h.nome}</button>
+                ))}
+              </div>
+            </Row>
+          )}
           <Row label="início"><Text value={String(g.start)} onCommit={(v) => set('start', timeOrNumber(v))} /></Row>
           <Row label="fim"><Text value={String(g.end)} onCommit={(v) => set('end', timeOrNumber(v))} /></Row>
           <Row label=""><span className="num text-[var(--muted)]">{formatTime(rg.start, 2)} → {formatTime(rg.end, 2)} ({(rg.end - rg.start).toFixed(2)} s)</span></Row>
@@ -193,7 +225,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
+export function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex items-center gap-2">
       <div className="w-20 shrink-0 text-ink-400 text-[12px]">{label}</div>
@@ -202,7 +234,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   )
 }
 
-function Text({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
+export function Text({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
   const [v, setV] = useState(value)
   useEffect(() => setV(value), [value])
   return (
@@ -212,7 +244,16 @@ function Text({ value, onCommit }: { value: string; onCommit: (v: string) => voi
   )
 }
 
-function Num({ value, onCommit }: { value: number; onCommit: (v: number) => void }) {
+function TextoLongo({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
+  const [v, setV] = useState(value)
+  useEffect(() => setV(value), [value])
+  return (
+    <textarea className="field min-h-[120px] leading-snug" value={v} onChange={(e) => setV(e.target.value)}
+      onKeyDown={(e) => e.stopPropagation()} onBlur={() => v !== value && onCommit(v)} />
+  )
+}
+
+export function Num({ value, onCommit }: { value: number; onCommit: (v: number) => void }) {
   return <Text value={String(value)} onCommit={(s) => { const n = Number(s.replace(',', '.')); if (Number.isFinite(n)) onCommit(n) }} />
 }
 
@@ -228,12 +269,13 @@ const DEFAULTS: Record<EffectType, Effect> = {
   shelf: { type: 'shelf', kind: 'low', freq: 200, gain: -3 },
   compressor: { type: 'compressor', threshold: -18, ratio: 3, attack: 0.01, release: 0.15 },
   duck: { type: 'duck', source: '', depth: 10, attack: 0.08, release: 0.4, hold: 0.6 },
+  espectral: { type: 'espectral', source: '', snr: 12, max: 7 },
   reverb: { type: 'reverb', mix: 0.2, seconds: 2.5 },
   limiter: { type: 'limiter', ceiling: -1 },
 }
 const NAMES: Record<EffectType, string> = {
   highpass: 'passa-altas', lowpass: 'passa-baixas', eq: 'EQ', shelf: 'shelf', compressor: 'compressor',
-  duck: 'ducking', reverb: 'reverb', limiter: 'limitador',
+  duck: 'ducking', espectral: 'duck espectral', reverb: 'reverb', limiter: 'limitador',
 }
 
 function Effects({ effects, base, tracks, master }: { effects: Effect[]; base: string; tracks: string[]; master?: boolean }) {
@@ -456,6 +498,223 @@ function CutPoints({ trackId, clipId }: { trackId: string; clipId: string }) {
           </div>
           {jumps.length > 40 && <button className="text-[11.5px] text-ink-400 hover:text-ink-100" onClick={() => setMore(!more)}>{more ? 'menos' : `mais ${jumps.length - 40}`}</button>}
         </>
+      )}
+    </div>
+  )
+}
+
+/** peças já cortadas nesta sessão, por música: o painel continua aberto quando a seleção passa para as peças novas */
+const pecasFeitas = new Map<string, PecasResposta>()
+const avisoFeito = new Map<string, string>()
+const qualEmenda = (e: number) => (e >= 0.999 ? '#8a8f98' : e > 0.8 ? '#4ade80' : e > 0.6 ? '#f2c14e' : e > 0.35 ? '#ff8a3d' : '#f87171')
+
+/**
+ * Remontar a música como um quebra-cabeça: o analisador a corta em peças de compassos inteiros, cada uma com uma função
+ * (abertura, respiro, base, subida, virada, pico, final), e a busca acha as sequências que seguem um molde (duração,
+ * curva de energia, picos em marcadores) com as emendas mais naturais. Aplicar troca o trecho por um clipe por peça.
+ */
+function Remontar({ trackId, clipId }: { trackId: string; clipId: string }) {
+  const resolved = useEditor((s) => s.resolved)
+  const rc = resolved?.tracks.find((t) => t.id === trackId)?.clips.find((c) => c.id === clipId)
+  const src = rc?.src ?? ''
+  const [pecas, setPecas] = useState<PecasResposta | null>(() => pecasFeitas.get(src) ?? null)
+  const [estado, setEstado] = useState<'idle' | 'busy' | 'error'>('idle')
+  const [erro, setErro] = useState('')
+  const [espera, setEspera] = useState(0)
+  const [profunda, setProfunda] = useState(false)
+  const [modoDur, setModoDur] = useState<'trecho' | 'segundos' | 'marcador'>('trecho')
+  const [segundos, setSegundos] = useState(60)
+  const [marcaFim, setMarcaFim] = useState('')
+  const [curva, setCurva] = useState('original')
+  const [marcaPico, setMarcaPico] = useState('')
+  const [livreInicio, setLivreInicio] = useState(false)
+  const [livreFim, setLivreFim] = useState(false)
+  const [opcoes, setOpcoes] = useState<Remontagem[] | null>(null)
+  const [msg, setMsg] = useState(() => avisoFeito.get(src) ?? '')
+  useEffect(() => { setPecas(pecasFeitas.get(src) ?? null); setOpcoes(null); setEstado('idle'); setMsg(avisoFeito.get(src) ?? '') }, [src])
+  if (!rc || !resolved) return null
+  const trecho = trechoDaMusica(resolved, trackId, clipId)
+  const ini = trecho[0]?.start ?? rc.start
+  const durTrecho = (trecho[trecho.length - 1]?.end ?? rc.end) - ini
+  const marcas = resolved.markers.filter((m) => m.at > ini + 1)
+
+  const analisar = (prof: boolean) => {
+    setEstado('busy'); setEspera(0); setProfunda(prof); setOpcoes(null)
+    loadPieces(src, prof, setEspera).then((r) => { pecasFeitas.set(src, r); setPecas(r); setEstado('idle') }).catch((e: Error) => { setErro(e.message); setEstado('error') })
+  }
+  const molde = (): Molde | null => {
+    if (!pecas || pecas.error) return null
+    const fim = marcas.find((m) => m.id === marcaFim)
+    const duracao = modoDur === 'segundos' ? segundos : modoDur === 'marcador' && fim ? fim.at - ini : durTrecho
+    const pico = marcas.find((m) => m.id === marcaPico)
+    return {
+      duracao,
+      curva: curva === 'original' ? curvaOriginal(pecas) : CURVAS[curva].pts,
+      picos: pico ? [pico.at - ini] : [],
+      inicio: livreInicio ? 'qualquer' : 'abertura',
+      fim: livreFim ? 'qualquer' : 'final',
+    }
+  }
+  const gerar = () => { const m = molde(); if (m && pecas) { setOpcoes(remontar(pecas, m, 3)); setMsg('') } }
+  const aplicar = (r: Remontagem, alinhar: boolean) => {
+    if (!pecas) return
+    const pico = marcas.find((m) => m.id === marcaPico)
+    const desloca = alinhar && pico && r.picos[0] ? pico.at - ini - r.picos[0].at : 0
+    void aplicarRemontagem(trackId, clipId, pecas, r, desloca).then((m) => { avisoFeito.set(src, m); setMsg(m) })
+    setOpcoes(null)
+  }
+  const P_ = pecas?.pieces ?? []
+  const fita = (seq: number[]) => (
+    <div className="flex h-3 rounded overflow-hidden gap-px">
+      {seq.map((j, k) => (
+        <div key={k} title={`P${j + 1} · ${P_[j].role} · energia ${Math.round(P_[j].energy * 100)}`}
+          style={{ flex: P_[j].end - P_[j].start, background: CORES_FUNCAO[P_[j].role] }} />
+      ))}
+    </div>
+  )
+  return (
+    <div className="rounded-lg bg-ink-850 border border-white/[0.05] p-2.5 space-y-2 mt-2">
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] uppercase tracking-wider text-ink-400 flex-1">Remontar</span>
+        {pecas && !pecas.error && <span className="text-[11px] font-mono text-ink-400" title="de onde veio a grade de compassos">
+          {P_.length} peças · {Math.round(pecas.bpm ?? 0)} BPM · {pecas.grid === 'allin1' ? 'All-In-One' : 'Essentia'}</span>}
+      </div>
+      {!pecas && estado !== 'busy' && (
+        <>
+          <div className="text-[11.5px] text-ink-400 leading-snug">Corta a música em frases (de 4 compassos), dá uma função a cada uma e monta de novo seguindo um molde: duração, curva de energia e picos nos marcadores, com as emendas mais naturais.</div>
+          <div className="flex flex-wrap gap-1.5">
+            <button className="btn" onClick={() => analisar(false)}>Cortar em peças</button>
+            <button className="btn" title="usa a grade e as seções do All-In-One (precisa estar configurado). Leva minutos na primeira vez." onClick={() => analisar(true)}>Análise profunda</button>
+          </div>
+          {estado === 'error' && <div className="text-[11.5px] text-red-400">{erro}</div>}
+        </>
+      )}
+      {estado === 'busy' && <div className="text-[11.5px] text-ink-400">{profunda ? `análise profunda (All-In-One)… ${espera} s — na CPU leva 3–5× a duração da música` : 'cortando em peças…'}</div>}
+      {pecas?.error && (
+        <div className="space-y-1.5">
+          <div className="text-[11.5px] text-amber-300">{pecas.error}</div>
+          {pecas.profunda_disponivel && !profunda && <button className="btn" onClick={() => analisar(true)}>Análise profunda</button>}
+        </div>
+      )}
+      {pecas && !pecas.error && (
+        <>
+          {fita(P_.map((p) => p.i))}
+          <div className="flex flex-wrap gap-x-2.5 gap-y-0.5 text-[10.5px] text-ink-400">
+            {Object.entries(CORES_FUNCAO).map(([f, c]) => <span key={f} className="flex items-center gap-1"><i className="inline-block w-2 h-2 rounded-sm" style={{ background: c }} />{f}</span>)}
+          </div>
+          <div className="grid grid-cols-[72px_1fr] items-center gap-x-2 gap-y-1.5 text-[11.5px]">
+            <span className="text-ink-400">duração</span>
+            <div className="flex flex-wrap gap-1.5 min-w-0">
+              <select className="field !w-auto" value={modoDur} onChange={(e) => setModoDur(e.target.value as never)}>
+                <option value="trecho">a do trecho ({durTrecho.toFixed(0)} s)</option>
+                <option value="segundos">segundos</option>
+                {marcas.length > 0 && <option value="marcador">até um marcador</option>}
+              </select>
+              {modoDur === 'segundos' && <input className="field !w-16" type="number" min={5} value={segundos} onChange={(e) => setSegundos(Number(e.target.value) || 0)} />}
+              {modoDur === 'marcador' && (
+                <select className="field !w-auto min-w-0 max-w-full" value={marcaFim} onChange={(e) => setMarcaFim(e.target.value)}>
+                  <option value="">—</option>
+                  {marcas.map((m) => <option key={m.id} value={m.id}>{m.label ?? m.id} ({formatTime(m.at, 1)})</option>)}
+                </select>
+              )}
+            </div>
+            <span className="text-ink-400">energia</span>
+            <select className="field" value={curva} onChange={(e) => setCurva(e.target.value)}>
+              <option value="original">como a original</option>
+              {Object.entries(CURVAS).map(([k, c]) => <option key={k} value={k}>{c.nome}</option>)}
+            </select>
+            <span className="text-ink-400">pico em</span>
+            <select className="field" value={marcaPico} onChange={(e) => setMarcaPico(e.target.value)} title="um trecho forte começa neste marcador (o drop num corte do vídeo)">
+              <option value="">nenhum marcador</option>
+              {marcas.map((m) => <option key={m.id} value={m.id}>{m.label ?? m.id} ({formatTime(m.at, 1)})</option>)}
+            </select>
+          </div>
+          <label className="flex items-center gap-1.5 text-[11.5px] text-ink-400"><input type="checkbox" checked={livreInicio} onChange={(e) => setLivreInicio(e.target.checked)} />pode começar no meio da música</label>
+          <label className="flex items-center gap-1.5 text-[11.5px] text-ink-400"><input type="checkbox" checked={livreFim} onChange={(e) => setLivreFim(e.target.checked)} />pode acabar antes do final (com fade)</label>
+          <div className="flex gap-1.5">
+            <button className="btn" onClick={gerar}>Gerar opções</button>
+            {pecas.profunda_disponivel && pecas.grid !== 'allin1' && <button className="btn" title="refaz as peças com a grade e as seções do All-In-One" onClick={() => analisar(true)}>Análise profunda</button>}
+          </div>
+          {opcoes && !opcoes.length && <div className="text-[11.5px] text-amber-300">Nenhuma sequência fecha com esse molde. Tente outra duração ou deixe começar/acabar no meio.</div>}
+          {opcoes?.map((r, k) => {
+            const novas = r.emendas.filter((e): e is number => e !== null && e < 0.999)
+            const pior = novas.length ? Math.min(...novas) : 1
+            const pico = r.picos[0]
+            return (
+              <div key={k} className="rounded-md bg-white/[0.03] p-2 space-y-1.5">
+                <div className="flex items-center gap-2 text-[11.5px]">
+                  <span className="font-mono text-ink-200">{formatTime(r.duracao, 1)}</span>
+                  <span className="text-ink-400 flex-1">{r.seq.length} peças · {novas.length} emendas novas{novas.length ? <> · pior <b style={{ color: qualEmenda(pior) }}>{Math.round(pior * 100)}%</b></> : ''}</span>
+                  <button className="btn !h-6 !px-2" onClick={() => aplicar(r, false)}>aplicar</button>
+                </div>
+                {fita(r.seq)}
+                <div className="flex flex-wrap gap-1 text-[10.5px] font-mono">
+                  {r.seq.map((j, i) => (
+                    <span key={i} className="text-ink-300" title={i ? `emenda ${Math.round((r.emendas[i] ?? 0) * 100)}%` : 'começo'}>
+                      {i > 0 && <span style={{ color: qualEmenda(r.emendas[i] ?? 0) }}>›</span>}P{j + 1}
+                    </span>
+                  ))}
+                </div>
+                {pico && (
+                  <div className="flex items-center gap-2 text-[11px] text-ink-400">
+                    <span className="flex-1">pico a {pico.erro < 0.05 ? 'tempo no marcador' : `${pico.erro.toFixed(1)} s do marcador`}</span>
+                    {pico.erro >= 0.05 && <button className="btn !h-6 !px-2" title="desloca a remontagem inteira para o pico cair exatamente no marcador" onClick={() => aplicar(r, true)}>aplicar alinhando</button>}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+          {msg && <div className="text-[11.5px] text-ink-300">{msg} · Ctrl+Z desfaz</div>}
+        </>
+      )}
+    </div>
+  )
+}
+
+/**
+ * As peças que o acervo achou na música (quando o arquivo veio de lá): P<n>, a função e onde começa no arquivo, com a
+ * borda na cor da função. As que caem dentro do clipe ficam acesas; clicar numa delas leva a agulha até lá.
+ */
+function PecasDoAcervo({ src, start, from, to, onSeparar }: { src: string; start: number; from: number; to: number; onSeparar: () => void }) {
+  const [a, setA] = useState<AcervoAnalysis | null | undefined>(acervoProntas.get(src))
+  useEffect(() => {
+    let vivo = true
+    setA(acervoProntas.get(src))
+    loadAcervo(src).then((x) => { if (vivo) setA(x) }, () => { if (vivo) setA(null) })
+    return () => { vivo = false }
+  }, [src])
+  if (!a?.pieces.length) return null
+  const setPlayhead = useEditor.getState().setPlayhead
+  const funcoes = [...new Set(a.pieces.map((p) => p.role).filter(Boolean))]
+  return (
+    <div className="space-y-1.5 pt-1">
+      <div className="text-[11px] uppercase tracking-wider text-ink-400">
+        Peças do acervo <span className="normal-case tracking-normal text-ink-500">· {a.id.split('/')[1]}{a.bpm ? ` · ${Math.round(a.bpm)} BPM` : ''}{a.key ? ` · ${a.key}` : ''}</span>
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {a.pieces.map((p, i) => {
+          const dentro = p.end > from && p.start < to
+          const cor = CORES_FUNCAO[p.role as keyof typeof CORES_FUNCAO] ?? '#8a8f98'
+          return (
+            <button key={i} disabled={!dentro}
+              className="rounded-md bg-ink-850 border border-white/[0.06] pl-1.5 pr-2 py-1 text-[11px] leading-none text-left disabled:opacity-40 hover:border-white/30"
+              style={{ borderLeft: `3px solid ${cor}` }}
+              title={`${p.mood ? `humor dominante: ${p.mood}\n` : ''}${formatTime(p.start, 1)} → ${formatTime(p.end, 1)} do arquivo · energia ${Math.round(p.energy * 100)}${dentro ? '\nclique para levar a agulha até aqui' : '\nfora do clipe'}`}
+              onClick={() => setPlayhead(start + Math.max(0, p.start - from))}>
+              <b className="text-ink-100">P{i + 1}</b> <span className="text-ink-400">{p.role || p.mood} · {formatTime(p.start, 0)}</span>
+            </button>
+          )
+        })}
+      </div>
+      {a.pieces.filter((p) => p.end > from + 0.05 && p.start < to - 0.05).length > 1 && (
+        <button className="btn" onClick={onSeparar} title="Corta o clipe nas divisas das peças: cada peça presente vira um clipe independente">Separar as peças</button>
+      )}
+      {funcoes.length > 0 && (
+        <div className="flex flex-wrap gap-x-2.5 gap-y-1 text-[10.5px] text-ink-400">
+          {Object.entries(CORES_FUNCAO).filter(([f]) => funcoes.includes(f)).map(([f, c]) => (
+            <span key={f} className="inline-flex items-center gap-1"><i className="inline-block w-2 h-2 rounded-sm" style={{ background: c }} />{f}</span>
+          ))}
+        </div>
       )}
     </div>
   )

@@ -1,6 +1,8 @@
 import type { Clip, Effect, Point, Project, Region, Track } from './schema.js'
 import { buildTimeContext, resolveTime, type TimeContext } from './time.js'
 import { round } from './util.js'
+import { corDoHumor, FAIXA_HUMOR } from './roteiro.js'
+import { pictureKind, type PictureKind } from './visual.js'
 
 /** A clip with every time turned into a number. */
 export interface ResolvedClip {
@@ -18,8 +20,14 @@ export interface ResolvedClip {
   gain: number
   fadeIn: number
   fadeOut: number
+  /** segundos que o som começa antes de `start` (a cabeça do crossfade de entrada, quebra-cabeça); 0 sem cabeça */
+  head: number
+  /** fades em potência constante (seno/cosseno), para crossfades de trilha quebra-cabeça sem afundar no meio */
+  equalPower: boolean
   muted: boolean
   label?: string
+  /** em trilhas de vídeo: o que o clipe desenha */
+  kind?: PictureKind
   raw: Clip
 }
 
@@ -46,6 +54,8 @@ export interface ResolvedTrack {
   type: 'audio' | 'bus' | 'video'
   /** holds library pieces only (`samplers: true`, or the older `lib-*` / `compl-*` tracks) */
   samplers: boolean
+  /** trechos de música analisada montados como quebra-cabeça (`quebra: true`) */
+  quebra: boolean
   name: string
   color: string
   volume: number
@@ -76,6 +86,9 @@ export interface ResolvedProject {
   ctx: TimeContext
 }
 
+/** o começo de um texto, para servir de rótulo */
+const resumo = (t: string) => (t.length > 48 ? `${t.slice(0, 46).trimEnd()}…` : t).replace(/\s+/g, ' ')
+
 const REGION_PALETTE = ['#6a9bcc', '#7b74b8', '#b47c62', '#6aa784', '#b8a05a', '#a8678f']
 const PALETTE = ['#5b8def', '#e0915b', '#5bbf8a', '#c75b9b', '#b9a44c', '#5bb3c7', '#9b7be0', '#d0625f']
 
@@ -91,23 +104,26 @@ export function resolveProject(project: Project): ResolvedProject {
   let end = 0
   const tracks: ResolvedTrack[] = project.tracks.map((t, i) => {
     const clips: ResolvedClip[] = (t.clips ?? []).map((c) => {
-      const asset = project.assets[c.asset]
-      if (!asset) diagnostics.push(`Clip "${c.id}" on track "${t.id}": unknown asset "${c.asset}"`)
+      const asset = c.asset ? project.assets[c.asset] : undefined
+      const video = t.type === 'video'
+      const kind = video ? pictureKind(c.type, asset?.src ?? '') : undefined
+      if (!asset && !(video && c.type)) diagnostics.push(`Clip "${c.id}" on track "${t.id}": unknown asset "${c.asset ?? ''}"`)
       const start = resolveTime(c.start, ctx, 0, diagnostics)
       const inPoint = c.in ?? 0
-      const fileDur = asset?.meta?.duration
-      const out = c.out ?? fileDur ?? inPoint
+      const fileDur = kind && kind !== 'video' ? undefined : asset?.meta?.duration
+      const out = c.out ?? (c.duration !== undefined ? inPoint + c.duration : fileDur ?? inPoint)
       const duration = Math.max(0, out - inPoint)
       end = Math.max(end, start + duration)
       return {
-        id: c.id, trackId: t.id, asset: c.asset, src: asset?.src ?? '', start: round(start), in: inPoint, out,
+        id: c.id, trackId: t.id, asset: c.asset ?? '', src: asset?.src ?? '', start: round(start), in: inPoint, out,
         end: round(start + duration), duration: round(duration), gain: c.gain ?? 0,
         bodyEnd: round(start + ((c.body ?? asset?.body) !== undefined ? Math.max(0, Math.min(duration, (c.body ?? asset!.body!) - inPoint)) : duration)),
-        fadeIn: c.fade_in ?? 0.005, fadeOut: c.fade_out ?? 0.005, muted: !!c.muted, label: c.label, raw: c,
+        fadeIn: c.fade_in ?? 0.005, fadeOut: c.fade_out ?? 0.005, head: Math.min(inPoint, c.head ?? 0), equalPower: !!t.quebra,
+        muted: !!c.muted, label: c.label, kind, raw: c,
       }
     })
     return {
-      id: t.id, type: t.type ?? 'audio', samplers: isSamplerTrack(t), name: t.name ?? t.id, color: t.color ?? PALETTE[i % PALETTE.length],
+      id: t.id, type: t.type ?? 'audio', samplers: isSamplerTrack(t), quebra: !!t.quebra && (t.type ?? 'audio') === 'audio', name: t.name ?? t.id, color: t.color ?? PALETTE[i % PALETTE.length],
       volume: t.volume ?? 0, pan: t.pan ?? 0, muted: !!t.muted, solo: !!t.solo, output: t.output ?? null,
       effects: t.effects ?? [], envelope: resolveEnvelope(t.automation?.volume, ctx, diagnostics), clips, raw: t,
     }
@@ -120,8 +136,8 @@ export function resolveProject(project: Project): ResolvedProject {
     const lane = g.lane ?? firstLane
     if (!lanes.some((l) => l.id === lane)) lanes.push({ id: lane, name: lane, color: undefined })
     return {
-      id: g.id, start: ctx.refs[g.id], end: ctx.refs[`${g.id}.end`], label: g.label ?? g.id,
-      color: g.color ?? lanes.find((l) => l.id === lane)?.color ?? REGION_PALETTE[i % REGION_PALETTE.length], lane, raw: g,
+      id: g.id, start: ctx.refs[g.id], end: ctx.refs[`${g.id}.end`], label: g.label ?? (g.text ? resumo(g.text) : g.id),
+      color: g.color ?? (lane === FAIXA_HUMOR ? corDoHumor(g.label) : undefined) ?? lanes.find((l) => l.id === lane)?.color ?? REGION_PALETTE[i % REGION_PALETTE.length], lane, raw: g,
     }
   })
   for (const g of regions) end = Math.max(end, g.end)

@@ -1,5 +1,6 @@
 import type { Project } from './schema.js'
 import { resolveProject } from './resolve.js'
+import { isStill, pictureKind } from './visual.js'
 
 export interface Diagnostic {
   severity: 'error' | 'warning'
@@ -36,8 +37,15 @@ export function validateProject(project: Project): Diagnostic[] {
     if (t.type === 'bus' && t.clips?.length) out.push({ severity: 'warning', message: `Bus "${t.id}" has clips; they are ignored` })
     if (t.type === 'video') {
       for (const c of t.clips ?? []) {
-        const m = project.assets[c.asset]?.meta
-        if (m && m.duration !== undefined && !m.width) out.push({ severity: 'error', message: `Clip "${c.id}" on video track "${t.id}": "${c.asset}" has no picture` })
+        if (!c.asset) {
+          if (!c.type) out.push({ severity: 'error', message: `Clip "${c.id}" on video track "${t.id}": no asset (only \`type: color\` and \`type: adjustment\` need none)` })
+          if (c.out === undefined && c.duration === undefined) out.push({ severity: 'error', message: `Clip "${c.id}" on video track "${t.id}": a ${c.type ?? 'clip'} needs a \`duration\`` })
+          continue
+        }
+        const a = project.assets[c.asset]
+        const kind = pictureKind(c.type, a?.src ?? '')
+        if (kind === 'video' && a?.meta && a.meta.duration !== undefined && !a.meta.width) out.push({ severity: 'error', message: `Clip "${c.id}" on video track "${t.id}": "${c.asset}" has no picture` })
+        if (isStill(kind) && c.out === undefined && c.duration === undefined) out.push({ severity: 'error', message: `Clip "${c.id}" on video track "${t.id}": a still (${kind}) needs a \`duration\`` })
       }
       if (t.output) out.push({ severity: 'warning', message: `Video track "${t.id}": output is ignored (it makes no sound)` })
     }
@@ -45,7 +53,8 @@ export function validateProject(project: Project): Diagnostic[] {
     for (const c of t.clips ?? []) {
       if (clipIds.has(c.id)) out.push({ severity: 'error', message: `Track "${t.id}": duplicate clip id "${c.id}"` })
       clipIds.add(c.id)
-      const dur = project.assets[c.asset]?.meta?.duration
+      const src = c.asset ? project.assets[c.asset]?.src ?? '' : ''
+      const dur = c.asset && (t.type !== 'video' || pictureKind(c.type, src) === 'video') ? project.assets[c.asset]?.meta?.duration : undefined
       if (dur !== undefined && (c.out ?? 0) > dur + 0.01) {
         out.push({ severity: 'warning', message: `Clip "${c.id}": out ${c.out} is past the end of the file (${dur})` })
       }
@@ -53,6 +62,7 @@ export function validateProject(project: Project): Diagnostic[] {
     }
     for (const e of t.effects ?? []) {
       if (e.type === 'duck' && !tracks.has(e.source)) out.push({ severity: 'error', message: `Track "${t.id}": duck source "${e.source}" is not a track` })
+      if (e.type === 'espectral' && !tracks.has(e.source)) out.push({ severity: 'error', message: `Track "${t.id}": espectral source "${e.source}" is not a track` })
     }
   }
   const regionIds = new Set<string>()

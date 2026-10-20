@@ -10,15 +10,20 @@ import { LibraryPanel } from './components/Library'
 import { MobileApp, useIsMobile } from './components/Mobile'
 import { BottomBar, Logo, MasterRow, TopBar } from './components/Bars'
 import { Toolbar } from './components/Toolbar'
+import { RoteiroPage } from './components/Roteiro'
 import { colar, copiar, crossfade, splitAt } from './tools'
+
+/** /c/<id>/roteiro: a mesma mixagem (e o mesmo áudio tocando), vista como texto */
+const naPaginaDoRoteiro = () => /^\/c\/[^/]+\/roteiro\/?$/.test(location.pathname)
 
 export function App() {
   const project = useEditor((s) => s.project)
   const [id, setId] = useState(currentId())
+  const [roteiro, setRoteiro] = useState(naPaginaDoRoteiro())
   const mobile = useIsMobile()
   useEffect(() => connect(), [])
   useEffect(() => {
-    const onPop = () => setId(currentId())
+    const onPop = () => { setId(currentId()); setRoteiro(naPaginaDoRoteiro()) }
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
   }, [])
@@ -32,8 +37,16 @@ export function App() {
   }, [id])
 
   // what you hear follows the file: an edit while playing rebuilds the graph at the playhead
+  // (só se mudou o que soa: um joinha ou uma tag nova não pode dar soluço no áudio)
+  const heard = useRef('')
   useEffect(() => {
-    const t = setTimeout(() => void engine.refresh(), 120)
+    const t = setTimeout(() => {
+      const r = useEditor.getState().resolved
+      const key = r ? JSON.stringify([r.tracks, r.master, r.sampleRate]) : ''
+      if (key === heard.current) return
+      heard.current = key
+      void engine.refresh()
+    }, 120)
     return () => clearTimeout(t)
   }, [project])
 
@@ -44,6 +57,8 @@ export function App() {
       if (tag === 'TEXTAREA' || tag === 'SELECT' || (tag === 'INPUT' && !['range', 'checkbox', 'color'].includes((el as HTMLInputElement).type))) return
       const s = useEditor.getState()
       const mod = e.ctrlKey || e.metaKey
+      // no roteiro a timeline não está à vista: só o transporte, salvar e desfazer
+      if (naPaginaDoRoteiro() && !(e.code === 'Space' || e.key === 'Home' || (mod && /^[szy]$/i.test(e.key)))) return
       if (e.code === 'Space') {
         e.preventDefault()
         ;(document.activeElement as HTMLElement | null)?.blur?.()
@@ -107,6 +122,7 @@ export function App() {
 
   const hasVideo = !!project?.tracks.some((t) => t.type === 'video')
   if (!id) return <Home />
+  if (roteiro) return <RoteiroPage />
   if (mobile) return <MobileApp />
   return (
     <div className="h-full flex flex-col">

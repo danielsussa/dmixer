@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { Animatable, Crop, Transform, Transition, VisualEffect } from './visual.js'
 
 /**
  * The whole mix is this file. Times are seconds on the timeline (or an expression
@@ -66,6 +67,19 @@ export const Effect = z.discriminatedUnion('type', [
     hold: z.number().min(0).optional(),
     bypass: z.boolean().optional(),
   }),
+  /**
+   * Duck espectral (o algoritmo do Trackspacer): em vez de baixar a faixa inteira, cava nela só as frequências que a
+   * voz da `source` está usando naquele instante, e só o quanto falta para a voz ficar `snr` dB acima da faixa em cada
+   * banda (até `max` dB). A análise (STFT da voz e da faixa, depois do volume e da automação) roda no servidor e vira
+   * uma tabela de ganhos por banda a cada 20 ms; render e preview aplicam a mesma tabela num banco de 8 filtros peaking.
+   */
+  z.object({
+    type: z.literal('espectral'),
+    source: z.string(),
+    snr: z.number().min(0).max(40).optional(),
+    max: z.number().min(0).max(24).optional(),
+    bypass: z.boolean().optional(),
+  }),
   z.object({
     type: z.literal('reverb'),
     mix: z.number().min(0).max(1),
@@ -79,7 +93,8 @@ export type EffectType = Effect['type']
 
 export const Clip = z.object({
   id: z.string().min(1),
-  asset: z.string().min(1),
+  /** O arquivo. Só um cartão de cor e uma camada de ajuste (trilhas de vídeo) vivem sem ele. */
+  asset: z.string().min(1).optional(),
   start: TimeValue,
   /** Source in/out, in seconds of the file. `out` defaults to the end of the file. */
   in: z.number().min(0).optional(),
@@ -92,10 +107,34 @@ export const Clip = z.object({
    * file), the next piece butts it, and what plays after (up to `out`, faded) rings under the next one like a tail.
    */
   body: z.number().positive().optional(),
+  /**
+   * Quebra-cabeça: a peça começa a soar `head` s antes do início visível (o material que vem antes do trecho no arquivo),
+   * crescendo por baixo da anterior — a metade de entrada do crossfade da junta. O início visível continua em `start`/`in`.
+   */
+  head: z.number().min(0).optional(),
   label: z.string().optional(),
   color: z.string().optional(),
   muted: z.boolean().optional(),
   note: z.string().optional(),
+
+  // ── só em trilhas de vídeo (ver visual.ts) ──
+  /**
+   * `color`: um cartão chapado da cor `fill` (preto por padrão), sem arquivo. `adjustment`: uma camada de ajuste,
+   * que não desenha nada e aplica os `effects` dela a tudo o que está abaixo, enquanto dura. Sem `type`, o clipe
+   * desenha o arquivo: vídeo, imagem ou página html.
+   */
+  type: z.enum(['color', 'adjustment']).optional(),
+  /** Imagens, páginas, cartões e camadas de ajuste não têm duração própria: é esta (o mesmo que `out` − `in`). */
+  duration: z.number().positive().optional(),
+  fill: z.string().optional(),
+  transform: Transform.optional(),
+  crop: Crop.optional(),
+  opacity: Animatable.optional(),
+  effects: z.array(VisualEffect).optional(),
+  transition: Transition.optional(),
+  transition_out: Transition.optional(),
+  /** Páginas html: vão na query string (`?t=…&pos=…`), para um modelo servir a vários clipes. */
+  params: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(),
 })
 export type Clip = z.infer<typeof Clip>
 
@@ -112,6 +151,12 @@ export const Track = z.object({
    * and library pieces never go anywhere else.
    */
   samplers: z.boolean().optional(),
+  /**
+   * Quebra-cabeça: trechos de músicas analisadas (o acervo), montados encostados. Cada clipe mostra só o corpo da peça
+   * (`body`) e só se move; o crossfade mora na junta: a cauda da peça (de `body` até `out`, com fade) soa por baixo da
+   * seguinte. Vizinhos no arquivo emendam sem fade.
+   */
+  quebra: z.boolean().optional(),
   name: z.string().optional(),
   color: z.string().optional(),
   volume: db.optional(),
@@ -149,6 +194,8 @@ export const Region = z.object({
   /** Id of the lane it sits on (see `lanes`); default is the first lane. */
   lane: z.string().optional(),
   note: z.string().optional(),
+  /** Na faixa `texto`: a fala deste trecho, antes de ser gravada (o roteiro lê daqui). */
+  text: z.string().optional(),
 })
 export type Region = z.infer<typeof Region>
 
@@ -224,5 +271,7 @@ export const Project = z.object({
 export type Project = z.infer<typeof Project>
 
 export function emptyProject(opts: { name?: string } = {}): Project {
-  return Project.parse({ version: SCHEMA_VERSION, project: { name: opts.name ?? 'untitled' }, assets: {}, tracks: [] })
+  // as faixas do roteiro já vêm prontas (os ids que roteiro.ts procura)
+  const lanes = [{ id: 'capitulos', name: 'Capítulos' }, { id: 'humor', name: 'Humor' }, { id: 'texto', name: 'Texto' }]
+  return Project.parse({ version: SCHEMA_VERSION, project: { name: opts.name ?? 'untitled' }, assets: {}, lanes, tracks: [] })
 }

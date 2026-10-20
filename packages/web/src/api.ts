@@ -1,4 +1,4 @@
-import type { PatchOp } from '@dmixer/core'
+import type { PatchOp, Pecas, Transcricao } from '@dmixer/core'
 import { useEditor } from './store'
 
 /**
@@ -108,7 +108,9 @@ export async function importAudio(file: File, trackId: string, start: number) {
     const track = project.tracks.find((t) => t.id === trackId)
     if (!track) return
     const clip = fresh(new Set(project.tracks.flatMap((t) => (t.clips ?? []).map((c) => c.id))), base)
-    const value = () => ({ id: clip, asset, start: Math.round(start * 1000) / 1000, label: file.name })
+    // uma foto não tem duração: entra com 4 s (o resto se acerta arrastando a borda ou no Inspetor)
+    const still = /\.(jpe?g|png|webp|gif|avif|bmp|tiff?)$/i.test(file.name)
+    const value = () => ({ id: clip, asset, start: Math.round(start * 1000) / 1000, ...(still ? { duration: 4 } : {}), label: file.name })
     await post('patch', {
       ops: [
         { op: 'add', path: `/assets/${asset}`, value: { src: j.src } },
@@ -127,13 +129,19 @@ export const redo = () => post('redo')
 export const save = () => post('save')
 export const reload = () => post('reload')
 export const applyYaml = (yaml: string) => post('yaml', { yaml })
-export const startRender = (format: 'mp3' | 'wav' | 'mp4' = 'mp3') => post('render', { format })
+export const startRender = (format: 'mp3' | 'wav' = 'mp3') => post('render', { format })
 
 /** The file's fingerprint (size + mtime), so a regenerated file is fetched again instead of served from cache. */
 function version(src: string) {
   const assets = useEditor.getState().project?.assets ?? {}
   const a = Object.values(assets).find((x) => x.src === src)
   return a?.meta?.hash ? `&v=${a.meta.hash}` : ''
+}
+
+/** Uma página de clipe html, por caminho: os links relativos dela (css, fontes) caem na mesma pasta. */
+export function pageUrl(src: string, query: string) {
+  const c = encodeURIComponent(useEditor.getState().projectName || '_')
+  return `/api/page/${c}/${src.split('/').map(encodeURIComponent).join('/')}?${query}`
 }
 
 export function mediaUrl(src: string) {
@@ -166,7 +174,7 @@ export interface Analysis {
 }
 
 const analysisCache = new Map<string, Promise<Analysis>>()
-/** Beat grid and cut points of a file; the first time takes a few seconds (the server caches it). */
+/** Legado (analisador antigo, analyze.py): grade e pontos de corte de um arquivo. Não roda mais sozinho na timeline; as músicas do acervo usam loadAcervo. */
 export function loadAnalysis(src: string): Promise<Analysis> {
   const key = src + version(src)
   let p = analysisCache.get(key)
@@ -183,6 +191,21 @@ export function loadAnalysis(src: string): Promise<Analysis> {
   }
   return p
 }
+export type PecasResposta = Pecas & { profunda_disponivel?: boolean }
+/**
+ * A música em peças (para remontar). A primeira vez leva segundos (Essentia) ou minutos (`profunda`, All-In-One): o
+ * servidor trabalha em segundo plano e aqui se pergunta de novo até ficar pronto; `progresso` recebe os segundos.
+ */
+export async function loadPieces(src: string, profunda: boolean, progresso?: (s: number) => void): Promise<PecasResposta> {
+  for (;;) {
+    const r = await fetch(`/api/pieces${q()}${q() ? '&' : '?'}src=${encodeURIComponent(src)}&profunda=${profunda ? 1 : 0}${version(src)}`)
+    const j = await r.json().catch(() => ({}))
+    if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`)
+    if (!j.running) return j as PecasResposta
+    progresso?.(j.seconds ?? 0)
+    await new Promise((ok) => setTimeout(ok, 2500))
+  }
+}
 /** Onde há fala num arquivo de voz: trechos [início, fim] em segundos do arquivo (o servidor guarda em cache). */
 export async function loadSpeech(src: string): Promise<[number, number][]> {
   const r = await fetch(`/api/speech${q()}${q() ? '&' : '?'}src=${encodeURIComponent(src)}${version(src)}`)
@@ -190,7 +213,49 @@ export async function loadSpeech(src: string): Promise<[number, number][]> {
   if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`)
   return j.spans ?? []
 }
-export const hasAnalysis = (src: string) => analysisCache.has(src + version(src))
+/** A análise do acervo para uma música que veio de lá: as peças com função (abertura, base, pico…), energia e humor. */
+export interface AcervoPiece { start: number; end: number; role: string; energy: number; mood: string; moods: Record<string, number> }
+export interface AcervoAnalysis { id: string; bpm?: number; key?: string; pieces: AcervoPiece[] }
+const acervoCache = new Map<string, Promise<AcervoAnalysis | null>>()
+/** análises do acervo já aqui, por src (null = o arquivo não é do acervo ou não foi analisado lá) */
+export const acervoProntas = new Map<string, AcervoAnalysis | null>()
+export function loadAcervo(src: string): Promise<AcervoAnalysis | null> {
+  const key = src + version(src)
+  let p = acervoCache.get(key)
+  if (!p) {
+    p = fetch(`/api/acervo${q()}${q() ? '&' : '?'}src=${encodeURIComponent(src)}${version(src)}`).then(async (r) => {
+      const j = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`)
+      acervoProntas.set(src, j.analysis ?? null)
+      if (j.analysis) useEditor.getState().setState({ analysisTick: useEditor.getState().analysisTick + 1 })
+      return j.analysis ?? null
+    })
+    p.catch(() => acervoCache.delete(key))
+    acervoCache.set(key, p)
+  }
+  return p
+}
+/** As músicas do acervo com análise profunda, com as peças (aba Músicas da Biblioteca). `src` é relativo a `root`. */
+export interface AcervoSong extends AcervoAnalysis { titulo: string; artista?: string; fonte?: string; duracao?: number; src: string; root: string }
+export async function loadAcervoSongs(): Promise<AcervoSong[]> {
+  const r = await fetch(`/api/acervo/musicas${q()}`)
+  const j = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`)
+  return j.songs ?? []
+}
+export const acervoTrechoUrl = (src: string, ini: number, fim: number) =>
+  `/api/acervo/trecho${q()}${q() ? '&' : '?'}src=${encodeURIComponent(src)}&ini=${ini.toFixed(3)}&fim=${fim.toFixed(3)}`
+const transcricoes = new Map<string, Transcricao | null>()
+/** O texto de cada fala (o `palavras.json` ao lado do áudio), por src; null quando não há. Pede só os que faltam. */
+export async function loadTranscricoes(srcs: string[]): Promise<Record<string, Transcricao | null>> {
+  const faltam = [...new Set(srcs)].filter((s) => !transcricoes.has(s + version(s)))
+  if (faltam.length) {
+    const j = await post('palavras', { srcs: faltam }) as Record<string, Transcricao | null>
+    for (const s of faltam) transcricoes.set(s + version(s), j[s] ?? null)
+  }
+  return Object.fromEntries(srcs.map((s) => [s, transcricoes.get(s + version(s)) ?? null]))
+}
+export const hasAnalysis =(src: string) => analysisCache.has(src + version(src))
 /** analyses already here, by src: what the timeline uses synchronously (beat grid, SNAP) */
 export const analisesProntas = new Map<string, Analysis>()
 
